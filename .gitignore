@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Secretos y configuraciones locales
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*credentials*
+*secret*
+
+# Estado de ejecución
+*.pid
+*.sock
+*.log
+runtime/
+state/
+tmp/
+
+# Copias locales de producción
+executor/sessions.py.production
+*.bak
+*.backup

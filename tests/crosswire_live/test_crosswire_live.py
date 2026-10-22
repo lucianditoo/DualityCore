@@ -1,7 +1,7 @@
-"""Automated acceptance test suite for DMAOL -> FORGE LINK integration (Phase 3D-I Hardened).
+"""Automated acceptance test suite for DMAOL -> FORGE LINK integration (Phase 3D-K Lockdown).
 
-Tests verify the 8 contractual acceptance criteria and the 13 hardened identity,
-type, and authority integrity regression requirements:
+Tests verify the 8 contractual acceptance criteria, the 13 hardened authority
+requirements, and the 10 Phase 3D-K identity lockdown requirements:
 1. Real contractual execution confirmed (ACCEPTED -> SUCCEEDED).
 2. Strict idempotency of requests and conflict detection.
 3. Fencing of generations and rejection of stale attempts.
@@ -23,6 +23,16 @@ type, and authority integrity regression requirements:
 19. Rejection of foreign session artifact reference (alien artifact ref).
 20. Rejection of caller-provided bytes mismatching authority bytes.
 21. Authority retrieval or database exceptions never silently swallowed.
+22. Rejection of missing deployment_id.
+23. Rejection of null deployment_id.
+24. Rejection of alien deployment_id.
+25. Rejection of altered result_id not matching authority execution_id.
+26. Rejection of missing or invalid result_id UUID format.
+27. Rejection of alien attempt when expected context arguments are omitted.
+28. Rejection of incomplete expected context (attempt_id or session_id missing).
+29. Rejection of transport get_artifact without non-empty session_id.
+30. Positive verification of full legitimate result with result_id verified.
+31. Safety: rejection never transitions task to SUCCESS or causes mutations.
 """
 import hashlib
 import io
@@ -147,7 +157,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             self.ledger._save_run(session_id, run)
             self.ledger.revise(state["assignments"][session_id], task_state="RUNNING", resource_state="ACTIVE_OBSERVED", certainty="OBSERVED")
         self.ledger.finish(session_id, evidence)
-        return session_id, f"artifact-{execution_id}", content, sha
+        return session_id, f"artifact-{execution_id}", content, sha, execution_id
 
     def tearDown(self):
         shutil.rmtree(self.test_dir, ignore_errors=True)
@@ -219,6 +229,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             "session_id": session_id,
             "attempt_id": self.attempt_id,
             "generation": 1,
+            "result_id": execution_id,
             "outcome": "SUCCEEDED",
             "artifact_ref": f"artifact-{execution_id}",
             "artifact_sha256": actual_sha,
@@ -284,6 +295,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             "session_id": "s-old",
             "attempt_id": self.attempt_id,
             "generation": 1,
+            "result_id": str(uuid.uuid4()),
             "outcome": "SUCCEEDED",
             "artifact_ref": "artifact-123",
             "artifact_sha256": "a" * 64,
@@ -379,7 +391,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
 
     def test_06_sha256_artifact_integrity(self):
         """6. Verify SHA-256 integrity check fails if artifact bytes do not match evidence."""
-        session_id, artifact_ref, real_bytes, expected_sha = self._create_finished_session()
+        session_id, artifact_ref, real_bytes, expected_sha, execution_id = self._create_finished_session()
         tampered_bytes = b"IGNITION tampered-bytes\n"
 
         result_envelope = {
@@ -388,6 +400,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             "session_id": session_id,
             "attempt_id": self.attempt_id,
             "generation": 1,
+            "result_id": execution_id,
             "outcome": "SUCCEEDED",
             "artifact_ref": artifact_ref,
             "artifact_sha256": expected_sha,
@@ -422,6 +435,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             "session_id": "s-uncertain",
             "attempt_id": self.attempt_id,
             "generation": 1,
+            "result_id": str(uuid.uuid4()),
             "outcome": "UNKNOWN",
             "duration_seconds": 0.0,
         }
@@ -464,18 +478,19 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             "session_id": "s-test",
             "attempt_id": self.attempt_id,
             "generation": 1,
+            "result_id": str(uuid.uuid4()),
             "outcome": "SUCCEEDED",
             "artifact_ref": "artifact-test",
             "artifact_sha256": "a" * 64,
         }
         with self.assertRaises(ResourceIdentityUnverifiableError) as ctx:
-            self.client.process_execution_outcome(self.task, envelope)
+            self.client.process_execution_outcome(self.task, envelope, attempt_id=self.attempt_id, session_id="s-test")
         self.assertIn("does not match expected task_id", str(ctx.exception))
 
         # Alien deployment_id
         envelope2 = dict(envelope, task_id=canonical_uuid_for_task(self.task.task_id), deployment_id="f" * 32)
         with self.assertRaises(ResourceIdentityUnverifiableError) as ctx:
-            self.client.process_execution_outcome(self.task, envelope2)
+            self.client.process_execution_outcome(self.task, envelope2, attempt_id=self.attempt_id, session_id="s-test")
         self.assertIn("does not match client deployment_id", str(ctx.exception))
 
     def test_10_rejection_incorrect_attempt(self):
@@ -487,6 +502,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             "session_id": "s-test",
             "attempt_id": alien_attempt_id,
             "generation": 1,
+            "result_id": str(uuid.uuid4()),
             "outcome": "SUCCEEDED",
             "artifact_ref": "artifact-test",
             "artifact_sha256": "a" * 64,
@@ -508,6 +524,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             "session_id": "s-wrong-session-9999",
             "attempt_id": self.attempt_id,
             "generation": 1,
+            "result_id": str(uuid.uuid4()),
             "outcome": "SUCCEEDED",
             "artifact_ref": "artifact-test",
             "artifact_sha256": "a" * 64,
@@ -530,12 +547,13 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
                 "session_id": "s-test",
                 "attempt_id": self.attempt_id,
                 "generation": bool_gen,
+                "result_id": str(uuid.uuid4()),
                 "outcome": "SUCCEEDED",
                 "artifact_ref": "artifact-test",
                 "artifact_sha256": "a" * 64,
             }
             with self.assertRaises(ContractValidationError) as ctx:
-                self.client.process_execution_outcome(self.task, envelope)
+                self.client.process_execution_outcome(self.task, envelope, attempt_id=self.attempt_id, session_id="s-test")
             self.assertIn("Invalid generation type: bool", str(ctx.exception))
 
     def test_13_rejection_textual_generation(self):
@@ -546,12 +564,13 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             "session_id": "s-test",
             "attempt_id": self.attempt_id,
             "generation": "1",
+            "result_id": str(uuid.uuid4()),
             "outcome": "SUCCEEDED",
             "artifact_ref": "artifact-test",
             "artifact_sha256": "a" * 64,
         }
         with self.assertRaises(ContractValidationError) as ctx:
-            self.client.process_execution_outcome(self.task, envelope)
+            self.client.process_execution_outcome(self.task, envelope, attempt_id=self.attempt_id, session_id="s-test")
         self.assertIn("Invalid generation type: str", str(ctx.exception))
 
     def test_14_rejection_float_generation(self):
@@ -562,12 +581,13 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             "session_id": "s-test",
             "attempt_id": self.attempt_id,
             "generation": 1.0,
+            "result_id": str(uuid.uuid4()),
             "outcome": "SUCCEEDED",
             "artifact_ref": "artifact-test",
             "artifact_sha256": "a" * 64,
         }
         with self.assertRaises(ContractValidationError) as ctx:
-            self.client.process_execution_outcome(self.task, envelope)
+            self.client.process_execution_outcome(self.task, envelope, attempt_id=self.attempt_id, session_id="s-test")
         self.assertIn("Invalid generation type: float", str(ctx.exception))
 
     def test_15_rejection_missing_artifact_ref_or_bytes(self):
@@ -579,11 +599,12 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             "session_id": "s-test",
             "attempt_id": self.attempt_id,
             "generation": 1,
+            "result_id": str(uuid.uuid4()),
             "outcome": "SUCCEEDED",
             "artifact_sha256": "a" * 64,
         }
         with self.assertRaises(ContractValidationError) as ctx:
-            self.client.process_execution_outcome(self.task, envelope_no_ref)
+            self.client.process_execution_outcome(self.task, envelope_no_ref, attempt_id=self.attempt_id, session_id="s-test")
         self.assertIn("artifact_ref", str(ctx.exception))
 
         # Has artifact_ref, but artifact is not published in authority
@@ -593,12 +614,13 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             "session_id": "s-test",
             "attempt_id": self.attempt_id,
             "generation": 1,
+            "result_id": str(uuid.uuid4()),
             "outcome": "SUCCEEDED",
             "artifact_ref": "nonexistent-artifact-999",
             "artifact_sha256": "a" * 64,
         }
         with self.assertRaises(AdapterError) as ctx:
-            self.client.process_execution_outcome(self.task, envelope_no_bytes, raw_artifact_bytes=None)
+            self.client.process_execution_outcome(self.task, envelope_no_bytes, attempt_id=self.attempt_id, session_id="s-test", raw_artifact_bytes=None)
         self.assertIn("UNPUBLISHED_ARTIFACT", str(ctx.exception))
 
     def test_16_rejection_missing_artifact_hash(self):
@@ -610,16 +632,17 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
                 "session_id": "s-test",
                 "attempt_id": self.attempt_id,
                 "generation": 1,
+                "result_id": str(uuid.uuid4()),
                 "outcome": "SUCCEEDED",
                 "artifact_ref": "artifact-test",
                 "artifact_sha256": bad_hash,
             }
             with self.assertRaises(ContractValidationError):
-                self.client.process_execution_outcome(self.task, envelope)
+                self.client.process_execution_outcome(self.task, envelope, attempt_id=self.attempt_id, session_id="s-test")
 
     def test_17_rejection_mismatched_artifact_hash(self):
         """17. Rejection: Mismatch between computed SHA-256 and contractual hash must fail."""
-        session_id, artifact_ref, real_bytes, real_sha = self._create_finished_session()
+        session_id, artifact_ref, real_bytes, real_sha, execution_id = self._create_finished_session()
         wrong_hash = "f" * 64
         envelope = {
             "deployment_id": self.deployment_id,
@@ -627,6 +650,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             "session_id": session_id,
             "attempt_id": self.attempt_id,
             "generation": 1,
+            "result_id": execution_id,
             "outcome": "SUCCEEDED",
             "artifact_ref": artifact_ref,
             "artifact_sha256": wrong_hash,
@@ -643,7 +667,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
 
     def test_18_legitimate_result_fully_validated(self):
         """18. Positive: Legitimate result with all 5 identities matching and valid artifact passes."""
-        session_id, artifact_ref, real_bytes, real_sha = self._create_finished_session()
+        session_id, artifact_ref, real_bytes, real_sha, execution_id = self._create_finished_session()
 
         envelope = {
             "deployment_id": self.deployment_id,
@@ -651,6 +675,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             "session_id": session_id,
             "attempt_id": self.attempt_id,
             "generation": 1,
+            "result_id": execution_id,
             "outcome": "SUCCEEDED",
             "artifact_ref": artifact_ref,
             "artifact_sha256": real_sha,
@@ -673,7 +698,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
     def test_19_rejection_alien_session_artifact_reference(self):
         """19. Rejection: Artifact belonging to another session cannot be claimed by current session."""
         # Create finished session A with authentic artifact A
-        session_a, artifact_a, bytes_a, sha_a = self._create_finished_session()
+        session_a, artifact_a, bytes_a, sha_a, exec_a = self._create_finished_session()
 
         # Create session B
         task_b_id = str(uuid.uuid4())
@@ -696,6 +721,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
         self.ledger.approve(self.auth_ref, task_b_id, attempt_b_id, 1)
         ack_b = self.client.start_task(task=task_b, attempt_id=attempt_b_id, authorization_ref=self.auth_ref)
         session_b = ack_b["session_id"]
+        exec_b = self.ledger.run(session_b)["execution_id"]
 
         # Present envelope for session B pointing to artifact_a from session A
         alien_artifact_envelope = {
@@ -704,6 +730,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             "session_id": session_b,
             "attempt_id": attempt_b_id,
             "generation": 1,
+            "result_id": exec_b,
             "outcome": "SUCCEEDED",
             "artifact_ref": artifact_a,  # Belongs to session_a!
             "artifact_sha256": sha_a,
@@ -720,7 +747,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
 
     def test_20_rejection_caller_bytes_mismatch_with_authority(self):
         """20. Rejection: Caller-provided bytes that differ from authority bytes are rejected."""
-        session_id, artifact_ref, real_bytes, real_sha = self._create_finished_session()
+        session_id, artifact_ref, real_bytes, real_sha, execution_id = self._create_finished_session()
 
         envelope = {
             "deployment_id": self.deployment_id,
@@ -728,6 +755,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             "session_id": session_id,
             "attempt_id": self.attempt_id,
             "generation": 1,
+            "result_id": execution_id,
             "outcome": "SUCCEEDED",
             "artifact_ref": artifact_ref,
             "artifact_sha256": real_sha,
@@ -746,7 +774,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
 
     def test_21_authority_retrieval_failure_never_masked(self):
         """21. Integrity: Authority database or retrieval exceptions are never silently swallowed."""
-        session_id, artifact_ref, real_bytes, real_sha = self._create_finished_session()
+        session_id, artifact_ref, real_bytes, real_sha, execution_id = self._create_finished_session()
 
         # Simulate broken authority artifact retrieval
         original_artifact = self.ledger.artifact
@@ -761,6 +789,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
                 "session_id": session_id,
                 "attempt_id": self.attempt_id,
                 "generation": 1,
+                "result_id": execution_id,
                 "outcome": "SUCCEEDED",
                 "artifact_ref": artifact_ref,
                 "artifact_sha256": real_sha,
@@ -775,6 +804,210 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             self.assertIn("ARTIFACT_RETRIEVAL_FAILED", str(ctx.exception))
         finally:
             self.ledger.artifact = original_artifact
+
+    # -----------------------------------------------------------------------
+    # FASE 3D-K: PRUEBAS NEGATIVAS Y DE CIERRE DE IDENTIDAD Y CONTEXTO
+    # -----------------------------------------------------------------------
+
+    def test_22_rejection_missing_deployment_id(self):
+        """22. Rejection: Envelope with missing deployment_id must be rejected."""
+        envelope = {
+            "task_id": canonical_uuid_for_task(self.task.task_id),
+            "session_id": "s-test",
+            "attempt_id": self.attempt_id,
+            "generation": 1,
+            "result_id": str(uuid.uuid4()),
+            "outcome": "SUCCEEDED",
+            "artifact_ref": "artifact-test",
+            "artifact_sha256": "a" * 64,
+        }
+        with self.assertRaises(ResourceIdentityUnverifiableError) as ctx:
+            self.client.process_execution_outcome(self.task, envelope, attempt_id=self.attempt_id, session_id="s-test")
+        self.assertIn("Missing or null 'deployment_id'", str(ctx.exception))
+
+    def test_23_rejection_null_deployment_id(self):
+        """23. Rejection: Envelope with null deployment_id must be rejected."""
+        envelope = {
+            "deployment_id": None,
+            "task_id": canonical_uuid_for_task(self.task.task_id),
+            "session_id": "s-test",
+            "attempt_id": self.attempt_id,
+            "generation": 1,
+            "result_id": str(uuid.uuid4()),
+            "outcome": "SUCCEEDED",
+            "artifact_ref": "artifact-test",
+            "artifact_sha256": "a" * 64,
+        }
+        with self.assertRaises(ResourceIdentityUnverifiableError) as ctx:
+            self.client.process_execution_outcome(self.task, envelope, attempt_id=self.attempt_id, session_id="s-test")
+        self.assertIn("Missing or null 'deployment_id'", str(ctx.exception))
+
+    def test_24_rejection_alien_deployment_id(self):
+        """24. Rejection: Envelope with mismatched alien deployment_id must be rejected."""
+        envelope = {
+            "deployment_id": "0123456789abcdef0123456789abcde0",
+            "task_id": canonical_uuid_for_task(self.task.task_id),
+            "session_id": "s-test",
+            "attempt_id": self.attempt_id,
+            "generation": 1,
+            "result_id": str(uuid.uuid4()),
+            "outcome": "SUCCEEDED",
+            "artifact_ref": "artifact-test",
+            "artifact_sha256": "a" * 64,
+        }
+        with self.assertRaises(ResourceIdentityUnverifiableError) as ctx:
+            self.client.process_execution_outcome(self.task, envelope, attempt_id=self.attempt_id, session_id="s-test")
+        self.assertIn("does not match client deployment_id", str(ctx.exception))
+
+    def test_25_rejection_altered_result_id(self):
+        """25. Rejection: Result envelope with altered result_id not matching authority must be rejected."""
+        session_id, artifact_ref, real_bytes, real_sha, execution_id = self._create_finished_session()
+        altered_result_id = str(uuid.uuid4())  # Different from execution_id
+
+        envelope = {
+            "deployment_id": self.deployment_id,
+            "task_id": canonical_uuid_for_task(self.task.task_id),
+            "session_id": session_id,
+            "attempt_id": self.attempt_id,
+            "generation": 1,
+            "result_id": altered_result_id,
+            "outcome": "SUCCEEDED",
+            "artifact_ref": artifact_ref,
+            "artifact_sha256": real_sha,
+        }
+        with self.assertRaises(ResourceIdentityUnverifiableError) as ctx:
+            self.client.process_execution_outcome(
+                self.task,
+                envelope,
+                attempt_id=self.attempt_id,
+                session_id=session_id,
+                raw_artifact_bytes=real_bytes,
+            )
+        self.assertIn("does not match authority", str(ctx.exception))
+
+    def test_26_rejection_missing_or_invalid_result_id(self):
+        """26. Rejection: Missing or malformed result_id in envelope must fail validation."""
+        # Missing result_id
+        envelope_no_res = {
+            "deployment_id": self.deployment_id,
+            "task_id": canonical_uuid_for_task(self.task.task_id),
+            "session_id": "s-test",
+            "attempt_id": self.attempt_id,
+            "generation": 1,
+            "outcome": "SUCCEEDED",
+            "artifact_ref": "artifact-test",
+            "artifact_sha256": "a" * 64,
+        }
+        with self.assertRaises(ContractValidationError) as ctx:
+            self.client.process_execution_outcome(self.task, envelope_no_res, attempt_id=self.attempt_id, session_id="s-test")
+        self.assertIn("result_id", str(ctx.exception))
+
+        # Invalid UUID format
+        for bad_id in ("not-a-uuid", 12345, "", "1234-invalid"):
+            bad_env = dict(envelope_no_res, result_id=bad_id)
+            with self.assertRaises(ContractValidationError):
+                self.client.process_execution_outcome(self.task, bad_env, attempt_id=self.attempt_id, session_id="s-test")
+
+    def test_27_rejection_alien_attempt_without_expected_args(self):
+        """27. Rejection: Invoking process_execution_outcome without expected attempt/session context is rejected."""
+        session_id, artifact_ref, real_bytes, real_sha, execution_id = self._create_finished_session()
+        envelope = {
+            "deployment_id": self.deployment_id,
+            "task_id": canonical_uuid_for_task(self.task.task_id),
+            "session_id": session_id,
+            "attempt_id": self.attempt_id,
+            "generation": 1,
+            "result_id": execution_id,
+            "outcome": "SUCCEEDED",
+            "artifact_ref": artifact_ref,
+            "artifact_sha256": real_sha,
+        }
+        # Neither attempt_id nor session_id provided -> must reject missing trusted context
+        with self.assertRaises(ResourceIdentityUnverifiableError) as ctx:
+            self.client.process_execution_outcome(self.task, envelope)
+        self.assertIn("Missing required trusted context", str(ctx.exception))
+
+    def test_28_rejection_incomplete_expected_context(self):
+        """28. Rejection: Providing partial expected context (only attempt_id or only session_id) is rejected."""
+        session_id, artifact_ref, real_bytes, real_sha, execution_id = self._create_finished_session()
+        envelope = {
+            "deployment_id": self.deployment_id,
+            "task_id": canonical_uuid_for_task(self.task.task_id),
+            "session_id": session_id,
+            "attempt_id": self.attempt_id,
+            "generation": 1,
+            "result_id": execution_id,
+            "outcome": "SUCCEEDED",
+            "artifact_ref": artifact_ref,
+            "artifact_sha256": real_sha,
+        }
+        # Attempt provided, session missing
+        with self.assertRaises(ResourceIdentityUnverifiableError) as ctx:
+            self.client.process_execution_outcome(self.task, envelope, attempt_id=self.attempt_id, session_id=None)
+        self.assertIn("session_id", str(ctx.exception))
+
+        # Session provided, attempt missing
+        with self.assertRaises(ResourceIdentityUnverifiableError) as ctx:
+            self.client.process_execution_outcome(self.task, envelope, attempt_id=None, session_id=session_id)
+        self.assertIn("attempt_id", str(ctx.exception))
+
+    def test_29_rejection_get_artifact_without_session(self):
+        """29. Rejection: Transport get_artifact requires non-empty session_id; unbound read is forbidden."""
+        session_id, artifact_ref, real_bytes, real_sha, execution_id = self._create_finished_session()
+
+        for bad_session in (None, "", "   "):
+            with self.assertRaises(ResourceIdentityUnverifiableError) as ctx:
+                self.transport.get_artifact(artifact_ref, session_id=bad_session)
+            self.assertIn("session_id is required", str(ctx.exception))
+
+    def test_30_full_legitimate_result_with_result_id_verified(self):
+        """30. Positive: Full verification of legitimate result with all 5 identities + result_id."""
+        session_id, artifact_ref, real_bytes, real_sha, execution_id = self._create_finished_session()
+
+        envelope = {
+            "deployment_id": self.deployment_id,
+            "task_id": canonical_uuid_for_task(self.task.task_id),
+            "session_id": session_id,
+            "attempt_id": self.attempt_id,
+            "generation": 1,
+            "result_id": execution_id,
+            "outcome": "SUCCEEDED",
+            "artifact_ref": artifact_ref,
+            "artifact_sha256": real_sha,
+            "duration_seconds": 0.45,
+        }
+
+        res = self.client.process_execution_outcome(
+            self.task,
+            envelope,
+            attempt_id=self.attempt_id,
+            session_id=session_id,
+            raw_artifact_bytes=real_bytes,
+        )
+        self.assertEqual(res.status, "SUCCESS")
+        self.assertEqual(res.fencing_token_used, 1)
+        self.assertIsNone(res.commit_sha)
+        self.assertEqual(res.execution_time_seconds, 0.45)
+        self.assertEqual(res.generated_artifacts, [artifact_ref])
+
+    def test_31_rejections_preserve_uncertainty_and_no_side_effects(self):
+        """31. Safety: Rejected execution outcomes never transition task to SUCCESS or produce side effects."""
+        envelope = {
+            "deployment_id": "0123456789abcdef0123456789abcde0",  # Alien deployment!
+            "task_id": canonical_uuid_for_task(self.task.task_id),
+            "session_id": "s-test",
+            "attempt_id": self.attempt_id,
+            "generation": 1,
+            "result_id": str(uuid.uuid4()),
+            "outcome": "SUCCEEDED",
+            "artifact_ref": "artifact-test",
+            "artifact_sha256": "a" * 64,
+        }
+        with self.assertRaises(ResourceIdentityUnverifiableError):
+            self.client.process_execution_outcome(self.task, envelope, attempt_id=self.attempt_id, session_id="s-test")
+
+        # Task phase in DMAOL remains ASSIGNED, never COMPLETED or SUCCESS
+        self.assertEqual(self.task.phase, TaskPhase.ASSIGNED)
 
 
 if __name__ == "__main__":

@@ -174,11 +174,25 @@ class DmaolLiveClient:
             )
 
         # -------------------------------------------------------------------
-        # ETAPA 1: Identidad contractual completa
+        # ETAPA 1: Identidad contractual completa y contexto obligatorio
         # -------------------------------------------------------------------
+        # Contexto esperado obligatorio
+        if attempt_id is None or not isinstance(attempt_id, str) or not attempt_id.strip():
+            raise ResourceIdentityUnverifiableError(
+                "Missing required trusted context: 'attempt_id' must be provided to verify execution outcome"
+            )
+        if session_id is None or not isinstance(session_id, str) or not session_id.strip():
+            raise ResourceIdentityUnverifiableError(
+                "Missing required trusted context: 'session_id' must be provided to verify execution outcome"
+            )
+
         # Deployment identity validation
-        res_deployment = result_envelope.get("deployment_id")
-        if res_deployment is not None and res_deployment != self.deployment_id:
+        if "deployment_id" not in result_envelope or result_envelope["deployment_id"] is None:
+            raise ResourceIdentityUnverifiableError("Missing or null 'deployment_id' in result envelope")
+        res_deployment = result_envelope["deployment_id"]
+        if not isinstance(res_deployment, str) or not res_deployment.strip():
+            raise ResourceIdentityUnverifiableError("Invalid 'deployment_id' type or empty value in result envelope")
+        if res_deployment != self.deployment_id:
             raise ResourceIdentityUnverifiableError(
                 f"Result deployment_id '{res_deployment}' does not match client deployment_id '{self.deployment_id}'"
             )
@@ -186,8 +200,8 @@ class DmaolLiveClient:
         # Task identity validation
         expected_task_id = canonical_uuid_for_task(task.task_id)
         res_task_id = result_envelope.get("task_id")
-        if res_task_id is None:
-            raise ResourceIdentityUnverifiableError("Missing 'task_id' in result envelope")
+        if res_task_id is None or not isinstance(res_task_id, str):
+            raise ResourceIdentityUnverifiableError("Missing or invalid 'task_id' in result envelope")
         if res_task_id != expected_task_id:
             raise ResourceIdentityUnverifiableError(
                 f"Result task_id '{res_task_id}' does not match expected task_id '{expected_task_id}'"
@@ -197,7 +211,7 @@ class DmaolLiveClient:
         res_attempt_id = result_envelope.get("attempt_id")
         if res_attempt_id is None or not isinstance(res_attempt_id, str) or not res_attempt_id.strip():
             raise ResourceIdentityUnverifiableError("Missing or invalid 'attempt_id' in result envelope")
-        if attempt_id is not None and res_attempt_id != attempt_id:
+        if res_attempt_id != attempt_id:
             raise ResourceIdentityUnverifiableError(
                 f"Result attempt_id '{res_attempt_id}' does not match expected attempt_id '{attempt_id}'"
             )
@@ -206,10 +220,20 @@ class DmaolLiveClient:
         res_session_id = result_envelope.get("session_id")
         if res_session_id is None or not isinstance(res_session_id, str) or not res_session_id.strip():
             raise ResourceIdentityUnverifiableError("Missing or invalid 'session_id' in result envelope")
-        if session_id is not None and res_session_id != session_id:
+        if res_session_id != session_id:
             raise ResourceIdentityUnverifiableError(
                 f"Result session_id '{res_session_id}' does not match expected session_id '{session_id}'"
             )
+
+        # Result ID format and presence validation
+        res_result_id = result_envelope.get("result_id")
+        if res_result_id is None or not isinstance(res_result_id, str) or not res_result_id.strip():
+            raise ContractValidationError("Missing or invalid 'result_id' in result envelope")
+        import uuid as _uuid
+        try:
+            _parsed_uuid = _uuid.UUID(res_result_id)
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ContractValidationError(f"Invalid 'result_id' UUID format: {res_result_id!r}") from exc
 
         # -------------------------------------------------------------------
         # ETAPA 3: Integridad obligatoria y verificación de artefacto desde autoridad
@@ -235,8 +259,12 @@ class DmaolLiveClient:
                     operation="verify_artifact",
                 )
 
-            # Retrieve from authority, verifying session binding
-            authority_bytes, authority_sha = self.transport.get_artifact(artifact_ref, session_id=res_session_id)
+            # Retrieve from authority, verifying session binding and result_id
+            authority_bytes, authority_sha = self.transport.get_artifact(
+                artifact_ref,
+                session_id=res_session_id,
+                result_id=res_result_id,
+            )
 
             if authority_bytes is None:
                 raise AdapterError(

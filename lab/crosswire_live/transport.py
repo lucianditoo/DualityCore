@@ -37,14 +37,25 @@ class ForgeLinkDirectTransport:
         else:
             raise TypeError(f"Unexpected response type from handler: {type(resp)}")
 
-    def get_artifact(self, artifact_ref: str, session_id: Optional[str] = None) -> Tuple[bytes, str]:
+    def get_artifact(
+        self,
+        artifact_ref: str,
+        session_id: str,
+        result_id: Optional[str] = None
+    ) -> Tuple[bytes, str]:
         """Retrieve verified artifact (content_bytes, sha) from the authentic authority.
 
         Ensures that:
-        1. The artifact is published in authority storage.
-        2. If session_id is provided, the artifact is bound to that session in the authority.
-        3. Internal database or lookup exceptions are not silently masked.
+        1. session_id is provided and non-empty (prohibits unbound historical reads).
+        2. The artifact is published in authority storage and bound to session_id.
+        3. If result_id is provided, verifies that it matches the execution identity in authority.
+        4. Internal database or lookup exceptions are not silently masked.
         """
+        if not session_id or not isinstance(session_id, str) or not session_id.strip():
+            raise ResourceIdentityUnverifiableError(
+                "session_id is required for artifact retrieval; unbound historical artifact reads are forbidden in the verification path"
+            )
+
         if not hasattr(self.target_handler, "artifact") or not callable(getattr(self.target_handler, "artifact")):
             raise AdapterError(
                 "ARTIFACT_AUTHORITY_UNSUPPORTED",
@@ -54,29 +65,32 @@ class ForgeLinkDirectTransport:
 
         # 1. Authority validation via published_result if available (Adapter)
         if hasattr(self.target_handler, "published_result") and callable(getattr(self.target_handler, "published_result")):
-            if session_id is not None:
-                try:
-                    pub = self.target_handler.published_result(session_id)
-                except Exception as exc:
-                    raise AdapterError(
-                        "ARTIFACT_RETRIEVAL_FAILED",
-                        f"Failed to query published result from authority for session '{session_id}': {exc}",
-                        operation="get_artifact",
-                    ) from exc
+            try:
+                pub = self.target_handler.published_result(session_id)
+            except Exception as exc:
+                raise AdapterError(
+                    "ARTIFACT_RETRIEVAL_FAILED",
+                    f"Failed to query published result from authority for session '{session_id}': {exc}",
+                    operation="get_artifact",
+                ) from exc
 
-                if pub is None:
-                    raise AdapterError(
-                        "NO_PUBLISHED_RESULT",
-                        f"No active published result in authority for session '{session_id}'",
-                        operation="get_artifact",
-                    )
-                if pub.get("artifact_ref") != artifact_ref:
-                    raise ResourceIdentityUnverifiableError(
-                        f"Artifact '{artifact_ref}' does not match published artifact '{pub.get('artifact_ref')}' for session '{session_id}'"
-                    )
+            if pub is None:
+                raise AdapterError(
+                    "NO_PUBLISHED_RESULT",
+                    f"No active published result in authority for session '{session_id}'",
+                    operation="get_artifact",
+                )
+            if pub.get("artifact_ref") != artifact_ref:
+                raise ResourceIdentityUnverifiableError(
+                    f"Artifact '{artifact_ref}' does not match published artifact '{pub.get('artifact_ref')}' for session '{session_id}'"
+                )
+            if result_id is not None and pub.get("result_id") != result_id:
+                raise ResourceIdentityUnverifiableError(
+                    f"Result ID '{result_id}' does not match authority published result_id '{pub.get('result_id')}' for session '{session_id}'"
+                )
 
         # 2. Authority validation via database binding if available (ExecutionLedger / SQLite backing)
-        if hasattr(self.target_handler, "db") and session_id is not None:
+        if hasattr(self.target_handler, "db"):
             try:
                 cur = self.target_handler.db.execute(
                     "SELECT session FROM artifacts WHERE ref = ?",
@@ -94,6 +108,19 @@ class ForgeLinkDirectTransport:
                     raise ResourceIdentityUnverifiableError(
                         f"Artifact '{artifact_ref}' is bound to session '{bound_session}', not expected session '{session_id}'"
                     )
+
+                if result_id is not None:
+                    run_row = self.target_handler.db.execute(
+                        "SELECT body FROM runs WHERE session = ?",
+                        (session_id,)
+                    ).fetchone()
+                    if run_row is not None:
+                        run_data = json.loads(run_row[0])
+                        expected_exec_id = run_data.get("execution_id")
+                        if expected_exec_id and expected_exec_id != result_id:
+                            raise ResourceIdentityUnverifiableError(
+                                f"Result ID '{result_id}' does not match authority execution_id '{expected_exec_id}' for session '{session_id}'"
+                            )
             except (AdapterError, ResourceIdentityUnverifiableError):
                 raise
             except Exception as exc:
@@ -129,4 +156,42 @@ class ForgeLinkDirectTransport:
                 "ARTIFACT_MALFORMED",
                 f"Unexpected artifact format from authority: {type(res)}",
                 operation="get_artifact",
+            )
+
+    def read_historical_artifact_unbound(self, artifact_ref: str) -> Tuple[bytes, str]:
+        """Explicitly unbound historical read of artifact bytes without session verification.
+
+        WARNING: This method must NEVER be used in the task result verification path.
+        """
+        if not hasattr(self.target_handler, "artifact") or not callable(getattr(self.target_handler, "artifact")):
+            raise AdapterError(
+                "ARTIFACT_AUTHORITY_UNSUPPORTED",
+                "Target handler does not support authentic artifact retrieval",
+                operation="read_historical_artifact_unbound",
+            )
+        try:
+            res = self.target_handler.artifact(artifact_ref)
+        except KeyError as exc:
+            raise AdapterError(
+                "UNPUBLISHED_ARTIFACT",
+                f"Artifact '{artifact_ref}' is not published in authority",
+                operation="read_historical_artifact_unbound",
+            ) from exc
+        except Exception as exc:
+            raise AdapterError(
+                "ARTIFACT_RETRIEVAL_FAILED",
+                f"Authority error retrieving artifact '{artifact_ref}': {exc}",
+                operation="read_historical_artifact_unbound",
+            ) from exc
+
+        if isinstance(res, tuple) and len(res) >= 2:
+            return bytes(res[0]), str(res[1])
+        elif isinstance(res, bytes):
+            import hashlib
+            return res, hashlib.sha256(res).hexdigest()
+        else:
+            raise AdapterError(
+                "ARTIFACT_MALFORMED",
+                f"Unexpected artifact format from authority: {type(res)}",
+                operation="read_historical_artifact_unbound",
             )

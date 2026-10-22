@@ -1,9 +1,11 @@
-"""DMAOL Live Client (Phase 3D-G Hardened).
+"""DMAOL Live Client (Phase 3D-G Hardened & Verified).
 
 Experimental high-level client wrapping DmaolExecutorAdapter to interact
 with FORGE LINK / ExecutionLedger under dmaol-executor/1 without creating
 an auxiliary execution authority or altering existing DMAOL models.
 """
+from __future__ import annotations
+
 import hashlib
 import time
 from typing import Dict, Any, Optional
@@ -133,8 +135,10 @@ class DmaolLiveClient:
         1. Strict Generation Types: rejects booleans, floats, strings, nulls, and out-of-range values.
         2. Contractual Identity: validates deployment_id, task_id, attempt_id, and session_id against
            the expected task/attempt/session and client configuration.
-        3. Mandatory Artifact Integrity: for SUCCEEDED outcomes, requires valid artifact_ref,
-           artifact_sha256, retrieves artifact bytes from the authentic authority, and verifies hash.
+        3. Mandatory Artifact Authority & Integrity: for SUCCEEDED outcomes, requires valid artifact_ref,
+           artifact_sha256, retrieves artifact bytes from the authentic authority (rejecting alien
+           session references), and verifies SHA-256 hash. Caller-provided bytes are never trusted
+           without verification against authority bytes.
         4. Outcome Preservation: outcome UNKNOWN remains UNKNOWN (never converted to SUCCESS);
            FAILED and CANCELLED remain non-successful.
         5. No Synthetic Data: no fabricated Git commits or execution duration.
@@ -208,7 +212,7 @@ class DmaolLiveClient:
             )
 
         # -------------------------------------------------------------------
-        # ETAPA 3: Integridad obligatoria y verificación de artefacto
+        # ETAPA 3: Integridad obligatoria y verificación de artefacto desde autoridad
         # -------------------------------------------------------------------
         outcome = result_envelope.get("outcome")
         if outcome is None:
@@ -223,31 +227,34 @@ class DmaolLiveClient:
             if not expected_sha or not isinstance(expected_sha, str) or len(expected_sha) != 64:
                 raise ContractValidationError("Successful result requires a valid 64-char hex 'artifact_sha256'")
 
-            # Obtain raw artifact bytes from the authentic authority or caller
-            actual_bytes = None
-            if hasattr(self.transport, "get_artifact"):
-                authority_bytes = self.transport.get_artifact(artifact_ref)
-                if authority_bytes is not None:
-                    if raw_artifact_bytes is not None and raw_artifact_bytes != authority_bytes:
-                        raise AdapterError(
-                            "ARTIFACT_CONTENT_MISMATCH",
-                            "Supplied raw_artifact_bytes does not match authentic artifact bytes stored in authority",
-                            operation="verify_artifact",
-                        )
-                    actual_bytes = authority_bytes
-
-            if actual_bytes is None:
-                actual_bytes = raw_artifact_bytes
-
-            if actual_bytes is None:
+            # Obtain raw artifact bytes strictly from the authentic authority
+            if not hasattr(self.transport, "get_artifact") or not callable(getattr(self.transport, "get_artifact")):
                 raise AdapterError(
-                    "ARTIFACT_BYTES_MISSING",
-                    f"Successful outcome requires artifact bytes for '{artifact_ref}', but bytes were not provided or available from authority",
+                    "ARTIFACT_AUTHORITY_UNSUPPORTED",
+                    "Transport does not support authentic artifact retrieval; cannot verify SUCCEEDED outcome",
                     operation="verify_artifact",
                 )
 
-            # Verify cryptographic hash
-            actual_sha = hashlib.sha256(actual_bytes).hexdigest()
+            # Retrieve from authority, verifying session binding
+            authority_bytes, authority_sha = self.transport.get_artifact(artifact_ref, session_id=res_session_id)
+
+            if authority_bytes is None:
+                raise AdapterError(
+                    "ARTIFACT_BYTES_MISSING",
+                    f"Authentic authority returned no bytes for artifact '{artifact_ref}'",
+                    operation="verify_artifact",
+                )
+
+            # If caller passed raw bytes as well, ensure strict match with authority bytes
+            if raw_artifact_bytes is not None and raw_artifact_bytes != authority_bytes:
+                raise AdapterError(
+                    "ARTIFACT_CONTENT_MISMATCH",
+                    "Supplied raw_artifact_bytes does not match authentic artifact bytes stored in authority",
+                    operation="verify_artifact",
+                )
+
+            # Verify cryptographic hash against contractual evidence
+            actual_sha = hashlib.sha256(authority_bytes).hexdigest()
             if actual_sha != expected_sha:
                 raise AdapterError(
                     "ARTIFACT_INTEGRITY_MISMATCH",

@@ -1,13 +1,13 @@
-"""Automated acceptance test suite for DMAOL -> FORGE LINK integration (Phase 3D-G Hardened).
+"""Automated acceptance test suite for DMAOL -> FORGE LINK integration (Phase 3D-I Hardened).
 
-Tests verify the 8 contractual acceptance criteria and the 10 hardened identity,
-type, and integrity regression requirements:
+Tests verify the 8 contractual acceptance criteria and the 13 hardened identity,
+type, and authority integrity regression requirements:
 1. Real contractual execution confirmed (ACCEPTED -> SUCCEEDED).
 2. Strict idempotency of requests and conflict detection.
 3. Fencing of generations and rejection of stale attempts.
 4. Non-destructive recovery preserving uncertainty without false claims.
 5. Cancellation without falsifying exit (CANCEL_REQUESTED preserved until exit).
-6. SHA-256 artifact integrity verification derived from actual bytes.
+6. SHA-256 artifact integrity verification derived from authentic authority bytes.
 7. Conservative handling of uncertain outcomes (UNKNOWN is never SUCCESS).
 8. Strict compliance with dmaol-executor/1 JSON contract.
 9. Rejection of alien identity with matching generation.
@@ -16,10 +16,13 @@ type, and integrity regression requirements:
 12. Rejection of boolean generation (True / False).
 13. Rejection of textual generation ("1").
 14. Rejection of floating point generation (1.0).
-15. Rejection of missing artifact reference or bytes on SUCCEEDED.
+15. Rejection of missing artifact reference or unpublished artifact on SUCCEEDED.
 16. Rejection of missing or invalid artifact hash on SUCCEEDED.
-17. Rejection of mismatched artifact hash.
+17. Rejection of mismatched artifact hash against computed bytes.
 18. Full verification of legitimate result with all 5-tuple identities.
+19. Rejection of foreign session artifact reference (alien artifact ref).
+20. Rejection of caller-provided bytes mismatching authority bytes.
+21. Authority retrieval or database exceptions never silently swallowed.
 """
 import hashlib
 import io
@@ -107,6 +110,44 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
         # Authorize attempt on the authentic ledger authority
         self.ledger.advance(self.task_id, self.attempt_id, 1)
         self.ledger.approve(self.auth_ref, self.task_id, self.attempt_id, 1)
+
+    def _create_finished_session(self, task=None, attempt_id=None, content=b"IGNITION isolated-echo-v1\n"):
+        """Helper to create and finish an authentic execution session in the ledger authority."""
+        task = task or self.task
+        attempt_id = attempt_id or self.attempt_id
+        start_ack = self.client.start_task(
+            task=task,
+            attempt_id=attempt_id,
+            authorization_ref=self.auth_ref,
+        )
+        session_id = start_ack["session_id"]
+        sha = hashlib.sha256(content).hexdigest()
+        execution_id = self.ledger.run(session_id)["execution_id"]
+        evidence = {
+            "identity": {"pid": 1234, "boot_id": str(uuid.uuid4()), "start_ticks": 5678},
+            "exit_confirmed": True,
+            "returncode": 0,
+            "timed_out": False,
+            "termination_requested": False,
+            "cancelled": False,
+            "duration_seconds": 0.42,
+            "artifact_hex": content.hex(),
+            "artifact_sha256": sha,
+            "stdout": "",
+            "stderr": "",
+            "stdout_bytes": 0,
+            "stderr_bytes": 0,
+            "stdout_truncated": False,
+            "stderr_truncated": False,
+        }
+        with self.ledger.transaction() as state:
+            run = self.ledger.run(session_id)
+            run["identity"] = evidence["identity"]
+            run["phase"] = "RUNNING"
+            self.ledger._save_run(session_id, run)
+            self.ledger.revise(state["assignments"][session_id], task_state="RUNNING", resource_state="ACTIVE_OBSERVED", certainty="OBSERVED")
+        self.ledger.finish(session_id, evidence)
+        return session_id, f"artifact-{execution_id}", content, sha
 
     def tearDown(self):
         shutil.rmtree(self.test_dir, ignore_errors=True)
@@ -338,41 +379,40 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
 
     def test_06_sha256_artifact_integrity(self):
         """6. Verify SHA-256 integrity check fails if artifact bytes do not match evidence."""
-        real_bytes = b"IGNITION isolated-echo-v1\n"
-        expected_sha = hashlib.sha256(real_bytes).hexdigest()
+        session_id, artifact_ref, real_bytes, expected_sha = self._create_finished_session()
         tampered_bytes = b"IGNITION tampered-bytes\n"
 
         result_envelope = {
             "deployment_id": self.deployment_id,
             "task_id": canonical_uuid_for_task(self.task.task_id),
-            "session_id": "s-test",
+            "session_id": session_id,
             "attempt_id": self.attempt_id,
             "generation": 1,
             "outcome": "SUCCEEDED",
-            "artifact_ref": "artifact-test",
+            "artifact_ref": artifact_ref,
             "artifact_sha256": expected_sha,
         }
 
-        # Valid bytes pass
+        # Valid bytes matching authority pass
         res = self.client.process_execution_outcome(
             self.task,
             result_envelope,
             attempt_id=self.attempt_id,
-            session_id="s-test",
+            session_id=session_id,
             raw_artifact_bytes=real_bytes,
         )
         self.assertEqual(res.status, "SUCCESS")
 
-        # Tampered bytes trigger AdapterError
+        # Tampered bytes trigger ARTIFACT_CONTENT_MISMATCH against authority
         with self.assertRaises(AdapterError) as ctx:
             self.client.process_execution_outcome(
                 self.task,
                 result_envelope,
                 attempt_id=self.attempt_id,
-                session_id="s-test",
+                session_id=session_id,
                 raw_artifact_bytes=tampered_bytes,
             )
-        self.assertIn("ARTIFACT_INTEGRITY_MISMATCH", str(ctx.exception))
+        self.assertIn("ARTIFACT_CONTENT_MISMATCH", str(ctx.exception))
 
     def test_07_uncertain_outcome_preservation(self):
         """7. Verify uncertain outcome is never converted into success."""
@@ -531,7 +571,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
         self.assertIn("Invalid generation type: float", str(ctx.exception))
 
     def test_15_rejection_missing_artifact_ref_or_bytes(self):
-        """15. Rejection: SUCCEEDED outcome missing artifact_ref or unavailable bytes must fail."""
+        """15. Rejection: SUCCEEDED outcome missing artifact_ref or unpublished artifact must fail."""
         # Missing artifact_ref
         envelope_no_ref = {
             "deployment_id": self.deployment_id,
@@ -546,7 +586,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             self.client.process_execution_outcome(self.task, envelope_no_ref)
         self.assertIn("artifact_ref", str(ctx.exception))
 
-        # Has artifact_ref, but bytes are unavailable from transport and not provided
+        # Has artifact_ref, but artifact is not published in authority
         envelope_no_bytes = {
             "deployment_id": self.deployment_id,
             "task_id": canonical_uuid_for_task(self.task.task_id),
@@ -559,7 +599,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
         }
         with self.assertRaises(AdapterError) as ctx:
             self.client.process_execution_outcome(self.task, envelope_no_bytes, raw_artifact_bytes=None)
-        self.assertIn("ARTIFACT_BYTES_MISSING", str(ctx.exception))
+        self.assertIn("UNPUBLISHED_ARTIFACT", str(ctx.exception))
 
     def test_16_rejection_missing_artifact_hash(self):
         """16. Rejection: SUCCEEDED outcome with missing or malformed artifact_sha256 must fail."""
@@ -579,27 +619,31 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
 
     def test_17_rejection_mismatched_artifact_hash(self):
         """17. Rejection: Mismatch between computed SHA-256 and contractual hash must fail."""
-        raw_bytes = b"real-unmodified-content\n"
+        session_id, artifact_ref, real_bytes, real_sha = self._create_finished_session()
         wrong_hash = "f" * 64
         envelope = {
             "deployment_id": self.deployment_id,
             "task_id": canonical_uuid_for_task(self.task.task_id),
-            "session_id": "s-test",
+            "session_id": session_id,
             "attempt_id": self.attempt_id,
             "generation": 1,
             "outcome": "SUCCEEDED",
-            "artifact_ref": "artifact-test",
+            "artifact_ref": artifact_ref,
             "artifact_sha256": wrong_hash,
         }
         with self.assertRaises(AdapterError) as ctx:
-            self.client.process_execution_outcome(self.task, envelope, raw_artifact_bytes=raw_bytes)
+            self.client.process_execution_outcome(
+                self.task,
+                envelope,
+                attempt_id=self.attempt_id,
+                session_id=session_id,
+                raw_artifact_bytes=real_bytes,
+            )
         self.assertIn("ARTIFACT_INTEGRITY_MISMATCH", str(ctx.exception))
 
     def test_18_legitimate_result_fully_validated(self):
         """18. Positive: Legitimate result with all 5 identities matching and valid artifact passes."""
-        real_bytes = b"IGNITION isolated-echo-v1\n"
-        real_sha = hashlib.sha256(real_bytes).hexdigest()
-        session_id = "s-legitimate-001"
+        session_id, artifact_ref, real_bytes, real_sha = self._create_finished_session()
 
         envelope = {
             "deployment_id": self.deployment_id,
@@ -608,7 +652,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             "attempt_id": self.attempt_id,
             "generation": 1,
             "outcome": "SUCCEEDED",
-            "artifact_ref": "artifact-legitimate-001",
+            "artifact_ref": artifact_ref,
             "artifact_sha256": real_sha,
             "duration_seconds": 0.38,
         }
@@ -624,7 +668,113 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
         self.assertEqual(res.fencing_token_used, 1)
         self.assertIsNone(res.commit_sha)
         self.assertEqual(res.execution_time_seconds, 0.38)
-        self.assertEqual(res.generated_artifacts, ["artifact-legitimate-001"])
+        self.assertEqual(res.generated_artifacts, [artifact_ref])
+
+    def test_19_rejection_alien_session_artifact_reference(self):
+        """19. Rejection: Artifact belonging to another session cannot be claimed by current session."""
+        # Create finished session A with authentic artifact A
+        session_a, artifact_a, bytes_a, sha_a = self._create_finished_session()
+
+        # Create session B
+        task_b_id = str(uuid.uuid4())
+        attempt_b_id = str(uuid.uuid4())
+        task_b = TaskEnvelope(
+            task_id=task_b_id,
+            idempotency_key=f"idem-{task_b_id}",
+            payload_digest="b" * 64,
+            correlation_id=f"corr-{task_b_id}",
+            title="Echo test B",
+            instructions="Execute fixed echo program under Forge Link",
+            target_branch="ag/architecture",
+            base_commit="18a5d35b64e9772f7bc651ee41faf526b843ea2b",
+            affected_paths=["artifact.txt"],
+            fencing_token=1,
+            phase=TaskPhase.ASSIGNED,
+            assigned_agent="codex",
+        )
+        self.ledger.advance(task_b_id, attempt_b_id, 1)
+        self.ledger.approve(self.auth_ref, task_b_id, attempt_b_id, 1)
+        ack_b = self.client.start_task(task=task_b, attempt_id=attempt_b_id, authorization_ref=self.auth_ref)
+        session_b = ack_b["session_id"]
+
+        # Present envelope for session B pointing to artifact_a from session A
+        alien_artifact_envelope = {
+            "deployment_id": self.deployment_id,
+            "task_id": canonical_uuid_for_task(task_b.task_id),
+            "session_id": session_b,
+            "attempt_id": attempt_b_id,
+            "generation": 1,
+            "outcome": "SUCCEEDED",
+            "artifact_ref": artifact_a,  # Belongs to session_a!
+            "artifact_sha256": sha_a,
+        }
+
+        with self.assertRaises(ResourceIdentityUnverifiableError) as ctx:
+            self.client.process_execution_outcome(
+                task_b,
+                alien_artifact_envelope,
+                attempt_id=attempt_b_id,
+                session_id=session_b,
+            )
+        self.assertIn(f"Artifact '{artifact_a}' is bound to session '{session_a}'", str(ctx.exception))
+
+    def test_20_rejection_caller_bytes_mismatch_with_authority(self):
+        """20. Rejection: Caller-provided bytes that differ from authority bytes are rejected."""
+        session_id, artifact_ref, real_bytes, real_sha = self._create_finished_session()
+
+        envelope = {
+            "deployment_id": self.deployment_id,
+            "task_id": canonical_uuid_for_task(self.task.task_id),
+            "session_id": session_id,
+            "attempt_id": self.attempt_id,
+            "generation": 1,
+            "outcome": "SUCCEEDED",
+            "artifact_ref": artifact_ref,
+            "artifact_sha256": real_sha,
+        }
+
+        # Caller provides arbitrary tampered bytes
+        with self.assertRaises(AdapterError) as ctx:
+            self.client.process_execution_outcome(
+                self.task,
+                envelope,
+                attempt_id=self.attempt_id,
+                session_id=session_id,
+                raw_artifact_bytes=b"tampered content not matching authority",
+            )
+        self.assertIn("ARTIFACT_CONTENT_MISMATCH", str(ctx.exception))
+
+    def test_21_authority_retrieval_failure_never_masked(self):
+        """21. Integrity: Authority database or retrieval exceptions are never silently swallowed."""
+        session_id, artifact_ref, real_bytes, real_sha = self._create_finished_session()
+
+        # Simulate broken authority artifact retrieval
+        original_artifact = self.ledger.artifact
+        def faulty_artifact(*args, **kwargs):
+            raise RuntimeError("Simulated storage/transport failure")
+        self.ledger.artifact = faulty_artifact
+
+        try:
+            envelope = {
+                "deployment_id": self.deployment_id,
+                "task_id": canonical_uuid_for_task(self.task.task_id),
+                "session_id": session_id,
+                "attempt_id": self.attempt_id,
+                "generation": 1,
+                "outcome": "SUCCEEDED",
+                "artifact_ref": artifact_ref,
+                "artifact_sha256": real_sha,
+            }
+            with self.assertRaises(AdapterError) as ctx:
+                self.client.process_execution_outcome(
+                    self.task,
+                    envelope,
+                    attempt_id=self.attempt_id,
+                    session_id=session_id,
+                )
+            self.assertIn("ARTIFACT_RETRIEVAL_FAILED", str(ctx.exception))
+        finally:
+            self.ledger.artifact = original_artifact
 
 
 if __name__ == "__main__":

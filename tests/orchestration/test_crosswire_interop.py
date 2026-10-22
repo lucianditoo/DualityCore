@@ -1,7 +1,8 @@
-"""DUALITY CORE - Fase 3C: Pruebas automatizadas de interoperabilidad cruzada (CROSSWIRE).
+"""DUALITY CORE - Fase 3C / 3C-D: Pruebas automatizadas de interoperabilidad cruzada (CROSSWIRE).
 
 Verifica la comunicacion contractual real entre DmaolExecutorAdapter (Antigravity)
-y Simulator (Codex commit c44af038c54135a03fb1e695a375b1d13f57c456).
+y Simulator (Codex), parametrizado tanto para el simulador baseline (commit c44af03)
+como para el simulador con endurecimiento de ledger (commit 60ce2db).
 """
 import hashlib
 import importlib.util
@@ -32,7 +33,8 @@ from orchestration.integration.contract_messages import (
 )
 from orchestration.integration.executor_adapter import DmaolExecutorAdapter, canonical_uuid_for_task
 
-CODEX_SIMULATOR_COMMIT = "c44af038c54135a03fb1e695a375b1d13f57c456"
+CODEX_BASELINE_COMMIT = "c44af038c54135a03fb1e695a375b1d13f57c456"
+CODEX_HARDENED_COMMIT = "60ce2db62da97005db5cb267bc8a1e53eea55abf"
 
 
 class CodexSimulatorInMemoryTransport:
@@ -57,26 +59,31 @@ class CodexSimulatorInMemoryTransport:
         return dump_strict_json(resp_dict)
 
 
-class TestCrosswireInteroperability(unittest.TestCase):
-    """Interoperability test suite connecting Antigravity DMAOL Adapter to Codex Simulator."""
+class BaseCrosswireTest:
+    """Base scenario suite executing against a dynamically extracted Codex Simulator version."""
+    CODEX_SIMULATOR_COMMIT: str = ""
 
     @classmethod
     def setUpClass(cls):
+        if not cls.CODEX_SIMULATOR_COMMIT:
+            return
         # Extract Codex Simulator code directly from Git into isolated temporary workspace
         cls.sim_tmp = tempfile.TemporaryDirectory()
-        sim_code_path = Path(cls.sim_tmp.name) / "codex_simulator.py"
-        cmd = ["git", "show", f"{CODEX_SIMULATOR_COMMIT}:lab/handshake/simulator.py"]
+        sim_module_name = f"codex_sim_{cls.CODEX_SIMULATOR_COMMIT[:7]}"
+        sim_code_path = Path(cls.sim_tmp.name) / f"{sim_module_name}.py"
+        cmd = ["git", "show", f"{cls.CODEX_SIMULATOR_COMMIT}:lab/handshake/simulator.py"]
         code = subprocess.check_output(cmd, text=True)
         sim_code_path.write_text(code, encoding="utf-8")
 
-        spec = importlib.util.spec_from_file_location("codex_simulator", str(sim_code_path))
+        spec = importlib.util.spec_from_file_location(sim_module_name, str(sim_code_path))
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
         cls.CodexSimulator = mod.Simulator
 
     @classmethod
     def tearDownClass(cls):
-        cls.sim_tmp.cleanup()
+        if hasattr(cls, "sim_tmp"):
+            cls.sim_tmp.cleanup()
 
     def setUp(self):
         self.test_dir = tempfile.TemporaryDirectory()
@@ -87,7 +94,7 @@ class TestCrosswireInteroperability(unittest.TestCase):
         self.lease_mgr = LeaseManager(self.store)
 
         # Setup Codex Simulator with SQLite in test_dir
-        self.db_path = str(self.base_path / "codex_sim.db")
+        self.db_path = str(self.base_path / "codex_sim.sqlite")
         self.deployment_id = "0123456789abcdef0123456789abcdef"
         self.simulator = self.CodexSimulator(self.db_path, self.deployment_id, simulated_channel=True)
 
@@ -332,13 +339,23 @@ class TestCrosswireInteroperability(unittest.TestCase):
         self.assertEqual(dmaol_res.status, "SUCCESS")
         # 2. Commit SHA is strictly None (artifact hash is NOT a git commit)
         self.assertIsNone(dmaol_res.commit_sha)
-        # 3. Execution time is 0.0 (unmeasured duration preserved as unknown, not invented)
+        # 3. Execution time is 0.0 (unmeasured duration preserved as sentinel marker, not invented)
         self.assertEqual(dmaol_res.execution_time_seconds, 0.0)
         # 4. Artifact reference preserved in generated_artifacts
         self.assertIn("output-report.json", dmaol_res.generated_artifacts)
         # 5. Completed at and fencing token intact
         self.assertEqual(dmaol_res.completed_at, 1700000000.0)
         self.assertEqual(dmaol_res.fencing_token_used, 1)
+
+
+class TestCrosswireBaselineV1(BaseCrosswireTest, unittest.TestCase):
+    """Executes full CROSSWIRE suite against baseline Codex Simulator (commit c44af03)."""
+    CODEX_SIMULATOR_COMMIT = CODEX_BASELINE_COMMIT
+
+
+class TestCrosswireHardenedV2(BaseCrosswireTest, unittest.TestCase):
+    """Executes full CROSSWIRE suite against hardened Codex Simulator (commit 60ce2db)."""
+    CODEX_SIMULATOR_COMMIT = CODEX_HARDENED_COMMIT
 
 
 if __name__ == "__main__":

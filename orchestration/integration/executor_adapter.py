@@ -11,8 +11,12 @@ from orchestration.models import (
 from orchestration.integration.errors import (
     AdapterError,
     ContractValidationError,
+    UnauthorizedError,
     StaleGenerationError,
+    IdempotencyConflictError,
+    AlreadyTerminalError,
     OutcomeUnknownError,
+    ResourceIdentityUnverifiableError,
 )
 from orchestration.integration.contract_messages import (
     CONTRACT_VERSION,
@@ -33,10 +37,38 @@ def canonical_uuid_for_task(task_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_DNS, task_id))
 
 
+def _check_response_error(resp_dict: Dict[str, Any], raise_on_error: bool = True) -> Dict[str, Any]:
+    """Inspect response for contractual errors and optionally raise typed exceptions."""
+    if not raise_on_error or resp_dict.get("error") is None:
+        return resp_dict
+
+    err = resp_dict["error"]
+    code = err.get("code")
+    op = err.get("operation", "")
+    msg = f"Contract error from executor: {code} during operation '{op}'"
+
+    if code == "STALE_GENERATION":
+        raise StaleGenerationError(msg, details=err)
+    elif code == "ALREADY_TERMINAL":
+        raise AlreadyTerminalError(msg, details=err)
+    elif code == "IDEMPOTENCY_CONFLICT":
+        raise IdempotencyConflictError(msg, details=err)
+    elif code == "OUTCOME_UNKNOWN":
+        raise OutcomeUnknownError(msg, operation=op, details=err)
+    elif code == "RESOURCE_IDENTITY_UNVERIFIABLE":
+        raise ResourceIdentityUnverifiableError(msg, details=err)
+    elif code == "INVALID_REQUEST":
+        raise ContractValidationError(msg, details=err)
+    elif code == "UNAUTHORIZED":
+        raise UnauthorizedError(msg, operation=op, details=err)
+    else:
+        raise AdapterError(code or "UNKNOWN_ERROR", msg, operation=op, details=err)
+
+
 class DmaolExecutorAdapter:
     """High-level integration adapter bridging DMAOL orchestrator and the Executor contract."""
 
-    def __init__(self, transport: SimulatedExecutorTransport, deployment_id: str):
+    def __init__(self, transport: Any, deployment_id: str):
         if not isinstance(deployment_id, str) or len(deployment_id) != 32:
             raise ContractValidationError("deployment_id must be exactly 32 lowercase hex characters")
         self.transport = transport
@@ -52,6 +84,7 @@ class DmaolExecutorAdapter:
         execution_timeout_ms: int = 60000,
         request_id: Optional[str] = None,
         attempt_id: Optional[str] = None,
+        raise_on_error: bool = True,
     ) -> Dict[str, Any]:
         """Initiate execution of a task attempt via the contract start operation."""
         if task.fencing_token < 1:
@@ -83,9 +116,12 @@ class DmaolExecutorAdapter:
         req_bytes = dump_strict_json(start_req)
         resp_bytes = self.transport.send_request(req_bytes)
         resp_dict = parse_strict_json(resp_bytes)
-        return validate_response_message(resp_dict)
+        validated = validate_response_message(resp_dict)
+        return _check_response_error(validated, raise_on_error)
 
-    def observe_lost_ack(self, original_request_id: str, authorization_ref: str = "auth-observe-001") -> Dict[str, Any]:
+    def observe_lost_ack(
+        self, original_request_id: str, authorization_ref: str = "auth-observe-001", raise_on_error: bool = True
+    ) -> Dict[str, Any]:
         """Query state of an operation when the original ACK was lost in transit."""
         obs_req = {
             "version": CONTRACT_VERSION,
@@ -97,7 +133,8 @@ class DmaolExecutorAdapter:
         req_bytes = dump_strict_json(obs_req)
         resp_bytes = self.transport.send_request(req_bytes)
         resp_dict = parse_strict_json(resp_bytes)
-        return validate_response_message(resp_dict)
+        validated = validate_response_message(resp_dict)
+        return _check_response_error(validated, raise_on_error)
 
     def observe_tuple(
         self,
@@ -106,7 +143,8 @@ class DmaolExecutorAdapter:
         session_id: str,
         generation: Optional[int] = None,
         authorization_ref: str = "auth-observe-001",
-        request_id: Optional[str] = None
+        request_id: Optional[str] = None,
+        raise_on_error: bool = True,
     ) -> Dict[str, Any]:
         """Query state using the bound 5-tuple."""
         obs_req = {
@@ -123,7 +161,8 @@ class DmaolExecutorAdapter:
         req_bytes = dump_strict_json(obs_req)
         resp_bytes = self.transport.send_request(req_bytes)
         resp_dict = parse_strict_json(resp_bytes)
-        return validate_response_message(resp_dict)
+        validated = validate_response_message(resp_dict)
+        return _check_response_error(validated, raise_on_error)
 
     def cancel_attempt(
         self,
@@ -133,7 +172,8 @@ class DmaolExecutorAdapter:
         generation: Optional[int] = None,
         reason_code: str = "OPERATOR_REQUEST",
         authorization_ref: str = "auth-cancel-001",
-        request_id: Optional[str] = None
+        request_id: Optional[str] = None,
+        raise_on_error: bool = True,
     ) -> Dict[str, Any]:
         """Request cancellation of an active attempt."""
         cancel_req = {
@@ -151,7 +191,8 @@ class DmaolExecutorAdapter:
         req_bytes = dump_strict_json(cancel_req)
         resp_bytes = self.transport.send_request(req_bytes)
         resp_dict = parse_strict_json(resp_bytes)
-        return validate_response_message(resp_dict)
+        validated = validate_response_message(resp_dict)
+        return _check_response_error(validated, raise_on_error)
 
     def recover_attempt(
         self,
@@ -160,7 +201,8 @@ class DmaolExecutorAdapter:
         session_id: str,
         generation: Optional[int] = None,
         authorization_ref: str = "auth-recover-001",
-        request_id: Optional[str] = None
+        request_id: Optional[str] = None,
+        raise_on_error: bool = True,
     ) -> Dict[str, Any]:
         """Recover and reconcile state non-destructively."""
         rec_req = {
@@ -177,18 +219,37 @@ class DmaolExecutorAdapter:
         req_bytes = dump_strict_json(rec_req)
         resp_bytes = self.transport.send_request(req_bytes)
         resp_dict = parse_strict_json(resp_bytes)
-        return validate_response_message(resp_dict)
+        validated = validate_response_message(resp_dict)
+        return _check_response_error(validated, raise_on_error)
 
     def translate_to_dmaol_execution_result(self, result_envelope: Dict[str, Any]) -> ExecutionResult:
-        """Convert a contractual result envelope into DMAOL's ExecutionResult aggregate."""
-        outcome = result_envelope["outcome"]
+        """Convert a contractual result envelope into DMAOL's ExecutionResult aggregate.
+
+        NOTE: An artifact SHA-256 hash is NEVER represented as a Git commit SHA.
+        Verifiable commit data is preserved only if explicitly provided, else None.
+        Execution duration is recorded as 0.0 strictly as an explicit sentinel marker
+        (indicating duration was unmeasured by the dmaol-executor/1 control channel),
+        not an actual execution duration measurement.
+        """
+        outcome = result_envelope.get("outcome", "FAILED")
         status = "SUCCESS" if outcome == "SUCCEEDED" else "FAILED"
+        commit_sha = result_envelope.get("commit_sha")
+
+        # 0.0 is a documented sentinel marker for unmeasured execution duration
+        duration = float(result_envelope.get("execution_time_seconds", 0.0))
+        artifacts = []
+        if result_envelope.get("artifact_ref"):
+            artifacts.append(result_envelope["artifact_ref"])
+
+        completed_at = float(result_envelope.get("completed_at", time.time()))
+        fencing_token = int(result_envelope.get("generation", 0))
+
         return ExecutionResult(
             status=status,
-            summary=f"Result from session {result_envelope['session_id']} (attempt {result_envelope['attempt_id']})",
-            commit_sha=result_envelope["artifact_sha256"][:40],
-            generated_artifacts=[result_envelope["artifact_ref"]],
-            execution_time_seconds=10.0,
-            completed_at=result_envelope["completed_at"],
-            fencing_token_used=result_envelope["generation"]
+            summary=f"Contractual result from session {result_envelope.get('session_id', 'unknown')} (attempt {result_envelope.get('attempt_id', 'unknown')}; duration=unmeasured[0.0s])",
+            commit_sha=commit_sha,
+            generated_artifacts=artifacts,
+            execution_time_seconds=duration,
+            completed_at=completed_at,
+            fencing_token_used=fencing_token
         )

@@ -2,6 +2,7 @@
 from orchestration.integration.errors import (
     AdapterError,
     ContractValidationError,
+    UnauthorizedError,
     StaleGenerationError,
     IdempotencyConflictError,
     AlreadyTerminalError,
@@ -24,6 +25,7 @@ from orchestration.integration.executor_adapter import DmaolExecutorAdapter, can
 __all__ = [
     "AdapterError",
     "ContractValidationError",
+    "UnauthorizedError",
     "StaleGenerationError",
     "IdempotencyConflictError",
     "AlreadyTerminalError",

@@ -52,6 +52,20 @@ class ContractValidationError(AdapterError):
         )
 
 
+class UnauthorizedError(AdapterError):
+    """Operation rejected due to invalid authorization or scope mismatch."""
+    def __init__(self, message: str, operation: str = "", details: Optional[Dict[str, Any]] = None):
+        super().__init__(
+            code="UNAUTHORIZED",
+            message=message,
+            operation=operation,
+            effect="NONE",
+            retry="DO_NOT_RETRY",
+            operator_review_required=False,
+            details=details,
+        )
+
+
 class StaleGenerationError(AdapterError):
     """Operation or result rejected due to obsolete generation/fencing token."""
     def __init__(self, message: str, details: Optional[Dict[str, Any]] = None):

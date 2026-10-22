@@ -257,18 +257,50 @@ def validate_response_message(data: Dict[str, Any]) -> Dict[str, Any]:
     if missing:
         raise ContractValidationError(f"Missing fields in response message: {missing}")
 
-    _validate_uuid(data["request_id"], "request_id")
-    _validate_uuid(data["operation_id"], "operation_id")
-    _validate_hex32(data["deployment_id"], "deployment_id")
-    _validate_uuid(data["task_id"], "task_id")
-    _validate_uuid(data["attempt_id"], "attempt_id")
-    _validate_generation(data["generation"], "generation")
-    _validate_session_id(data["session_id"], "session_id")
+    err = data["error"]
+    if err is None:
+        _validate_uuid(data["request_id"], "request_id")
+        _validate_uuid(data["operation_id"], "operation_id")
+        _validate_hex32(data["deployment_id"], "deployment_id")
+        _validate_uuid(data["task_id"], "task_id")
+        _validate_uuid(data["attempt_id"], "attempt_id")
+        _validate_generation(data["generation"], "generation")
+        _validate_session_id(data["session_id"], "session_id")
+        if data["executor_instance"] is not None:
+            _validate_hex32(data["executor_instance"], "executor_instance")
+        _validate_positive_int(data["state_version"], "state_version")
+    else:
+        if not isinstance(err, dict):
+            raise ContractValidationError("Response 'error' must be a dict or null")
+        code = err.get("code")
+        if code not in VALID_ERROR_CODES:
+            raise ContractValidationError(f"Invalid error code '{code}' in response error")
+        if err.get("operation") is not None:
+            _validate_string(err.get("operation"), "error.operation")
+        if err.get("effect") not in {"NONE", "MAY_HAVE_OCCURRED", "CONFIRMED"}:
+            raise ContractValidationError(f"Invalid error effect: {err.get('effect')}")
+        if not isinstance(err.get("operator_review_required"), bool):
+            raise ContractValidationError("error.operator_review_required must be a boolean")
 
-    if data["executor_instance"] is not None:
-        _validate_hex32(data["executor_instance"], "executor_instance")
-
-    _validate_positive_int(data["state_version"], "state_version")
+        # Identity fields can be None if error occurred before assignment or during auth failure
+        if data["request_id"] is not None:
+            _validate_uuid(data["request_id"], "request_id")
+        if data["operation_id"] is not None:
+            _validate_uuid(data["operation_id"], "operation_id")
+        if data["deployment_id"] is not None:
+            _validate_hex32(data["deployment_id"], "deployment_id")
+        if data["task_id"] is not None:
+            _validate_uuid(data["task_id"], "task_id")
+        if data["attempt_id"] is not None:
+            _validate_uuid(data["attempt_id"], "attempt_id")
+        if data["generation"] is not None:
+            _validate_generation(data["generation"], "generation")
+        if data["session_id"] is not None:
+            _validate_session_id(data["session_id"], "session_id")
+        if data["executor_instance"] is not None:
+            _validate_hex32(data["executor_instance"], "executor_instance")
+        if data["state_version"] is not None:
+            _validate_positive_int(data["state_version"], "state_version")
 
     if data["task_state"] not in VALID_TASK_STATES:
         raise ContractValidationError(f"Invalid task_state '{data['task_state']}'")
@@ -279,34 +311,24 @@ def validate_response_message(data: Dict[str, Any]) -> Dict[str, Any]:
 
     _validate_string(data["observed_at"], "observed_at")
     _validate_string(data["source"], "source")
-
-    err = data["error"]
-    if err is not None:
-        if not isinstance(err, dict):
-            raise ContractValidationError("Response 'error' must be a dict or null")
-        code = err.get("code")
-        if code not in VALID_ERROR_CODES:
-            raise ContractValidationError(f"Invalid error code '{code}' in response error")
-        _validate_string(err.get("operation"), "error.operation")
-        if err.get("effect") not in {"NONE", "MAY_HAVE_OCCURRED", "CONFIRMED"}:
-            raise ContractValidationError(f"Invalid error effect: {err.get('effect')}")
-        if not isinstance(err.get("operator_review_required"), bool):
-            raise ContractValidationError("error.operator_review_required must be a boolean")
-
     return data
 
 
 def validate_result_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
     """Strictly validate an incoming task execution result envelope."""
-    if data.get("version") != CONTRACT_VERSION:
+    if "version" in data and data["version"] != CONTRACT_VERSION:
         raise ContractValidationError(f"Invalid result version: {data.get('version')}")
 
     required_fields = {
-        "version", "task_id", "attempt_id", "generation", "session_id",
-        "result_id", "outcome", "artifact_ref", "artifact_sha256",
-        "completed_at", "signature"
+        "task_id", "attempt_id", "generation", "session_id",
+        "result_id", "outcome", "artifact_ref", "artifact_sha256"
     }
-    unknown = set(data.keys()) - required_fields
+    allowed_fields = required_fields | {
+        "version", "deployment_id", "completed_at", "signature",
+        "commit_sha", "execution_time_seconds"
+    }
+
+    unknown = set(data.keys()) - allowed_fields
     if unknown:
         raise ContractValidationError(f"Unknown fields in result envelope: {unknown}")
 
@@ -320,14 +342,19 @@ def validate_result_envelope(data: Dict[str, Any]) -> Dict[str, Any]:
     _validate_session_id(data["session_id"], "session_id")
     _validate_uuid(data["result_id"], "result_id")
 
+    if data.get("deployment_id") is not None:
+        _validate_hex32(data["deployment_id"], "deployment_id")
+
     if data["outcome"] not in ("SUCCEEDED", "FAILED"):
         raise ContractValidationError(f"Invalid result outcome '{data['outcome']}'. Expected SUCCEEDED or FAILED")
 
     _validate_string(data["artifact_ref"], "artifact_ref")
     _validate_hex64(data["artifact_sha256"], "artifact_sha256")
 
-    if not isinstance(data["completed_at"], (int, float)) or data["completed_at"] <= 0:
-        raise ContractValidationError(f"Invalid completed_at timestamp: {data['completed_at']!r}")
+    if "completed_at" in data:
+        if not isinstance(data["completed_at"], (int, float)) or data["completed_at"] <= 0:
+            raise ContractValidationError(f"Invalid completed_at timestamp: {data['completed_at']!r}")
 
-    _validate_string(data["signature"], "signature")
+    if "signature" in data:
+        _validate_string(data["signature"], "signature")
     return data

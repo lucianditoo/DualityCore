@@ -143,7 +143,9 @@ def run_handshake_demo(temp_dir: str, verbose: bool = True) -> Dict[str, Any]:
 
     reloaded_task = fresh_store.load_task(task.task_id)
     assert reloaded_task.phase == TaskPhase.AWAITING_REVIEW
-    assert reloaded_task.execution_result.commit_sha == artifact_hash[:40]
+    assert reloaded_task.execution_result.commit_sha is None
+    assert "output-handshake-001.json" in reloaded_task.execution_result.generated_artifacts
+    assert reloaded_task.execution_result.execution_time_seconds == 0.0
 
     obs_req = {
         "version": CONTRACT_VERSION,

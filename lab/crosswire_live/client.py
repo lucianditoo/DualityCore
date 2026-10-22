@@ -242,6 +242,9 @@ class DmaolLiveClient:
         if outcome is None:
             raise ContractValidationError("Missing 'outcome' in result envelope")
 
+        if outcome not in ("SUCCEEDED", "FAILED", "UNKNOWN", "CANCELLED"):
+            raise ContractValidationError(f"Invalid outcome: '{outcome}'")
+
         if outcome == "SUCCEEDED":
             artifact_ref = result_envelope.get("artifact_ref")
             if not artifact_ref or not isinstance(artifact_ref, str) or not artifact_ref.strip():
@@ -251,6 +254,25 @@ class DmaolLiveClient:
             if not expected_sha or not isinstance(expected_sha, str) or len(expected_sha) != 64:
                 raise ContractValidationError("Successful result requires a valid 64-char hex 'artifact_sha256'")
 
+        # Correlación obligatoria de result_id con autoridad de ejecución para todos los estados
+        if not hasattr(self.transport, "get_execution_identity") or not callable(getattr(self.transport, "get_execution_identity")):
+            raise ResourceIdentityUnverifiableError(
+                "Transport does not support authentic execution identity verification; cannot authenticate outcome"
+            )
+
+        authority_exec_id = self.transport.get_execution_identity(res_session_id)
+        if authority_exec_id is None:
+            # Si la autoridad no tiene registro de ejecución para esta sesión, la identidad no puede verificarse
+            raise ResourceIdentityUnverifiableError(
+                f"Authority has no execution record for session '{res_session_id}'; cannot verify outcome '{outcome}'"
+            )
+
+        if res_result_id != authority_exec_id:
+            raise ResourceIdentityUnverifiableError(
+                f"Result result_id '{res_result_id}' does not match authority execution_id '{authority_exec_id}' for session '{res_session_id}'"
+            )
+
+        if outcome == "SUCCEEDED":
             # Obtain raw artifact bytes strictly from the authentic authority
             if not hasattr(self.transport, "get_artifact") or not callable(getattr(self.transport, "get_artifact")):
                 raise AdapterError(

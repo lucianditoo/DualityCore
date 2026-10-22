@@ -37,6 +37,59 @@ class ForgeLinkDirectTransport:
         else:
             raise TypeError(f"Unexpected response type from handler: {type(resp)}")
 
+    def get_execution_identity(self, session_id: str) -> Optional[str]:
+        """Query the authority for the authentic execution_id assigned to session_id.
+
+        Returns:
+            str: The execution_id recorded by the authority for this session.
+            None: If the authority has no recorded execution for this session.
+        """
+        if not session_id or not isinstance(session_id, str) or not session_id.strip():
+            raise ResourceIdentityUnverifiableError("session_id must be provided to query execution identity")
+
+        # 1. Direct query on target_handler if it has run() (e.g. ExecutionLedger)
+        if hasattr(self.target_handler, "run") and callable(getattr(self.target_handler, "run")):
+            try:
+                run_data = self.target_handler.run(session_id)
+                if isinstance(run_data, dict) and "execution_id" in run_data:
+                    return str(run_data["execution_id"])
+            except Exception:
+                pass
+
+        # 2. Query target_handler with backend context (e.g. Adapter / ForgeLabAdapter)
+        if hasattr(self.target_handler, "backend") and hasattr(self.target_handler.backend, "_db"):
+            try:
+                with self.target_handler.backend._db() as ledger:
+                    if hasattr(ledger, "run") and callable(getattr(ledger, "run")):
+                        run_data = ledger.run(session_id)
+                        if isinstance(run_data, dict) and "execution_id" in run_data:
+                            return str(run_data["execution_id"])
+            except Exception:
+                pass
+
+        # 3. Direct query on target_handler.db if SQLite connection available
+        if hasattr(self.target_handler, "db"):
+            try:
+                cur = self.target_handler.db.execute("SELECT body FROM runs WHERE session = ?", (session_id,))
+                row = cur.fetchone()
+                if row is not None:
+                    run_data = json.loads(row[0])
+                    if isinstance(run_data, dict) and "execution_id" in run_data:
+                        return str(run_data["execution_id"])
+            except Exception:
+                pass
+
+        # 4. Fallback check published_result if available
+        if hasattr(self.target_handler, "published_result") and callable(getattr(self.target_handler, "published_result")):
+            try:
+                pub = self.target_handler.published_result(session_id)
+                if pub and isinstance(pub, dict) and "result_id" in pub:
+                    return str(pub["result_id"])
+            except Exception:
+                pass
+
+        return None
+
     def get_artifact(
         self,
         artifact_ref: str,

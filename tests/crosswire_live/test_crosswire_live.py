@@ -1,7 +1,8 @@
-"""Automated acceptance test suite for DMAOL -> FORGE LINK integration (Phase 3D-K Lockdown).
+"""Automated acceptance test suite for DMAOL -> FORGE LINK integration (Phase 3D-M Final Correlation).
 
 Tests verify the 8 contractual acceptance criteria, the 13 hardened authority
-requirements, and the 10 Phase 3D-K identity lockdown requirements:
+requirements, the 10 Phase 3D-K identity lockdown requirements, and the 5 Phase 3D-M
+non-success result_id authority correlation requirements:
 1. Real contractual execution confirmed (ACCEPTED -> SUCCEEDED).
 2. Strict idempotency of requests and conflict detection.
 3. Fencing of generations and rejection of stale attempts.
@@ -33,6 +34,12 @@ requirements, and the 10 Phase 3D-K identity lockdown requirements:
 29. Rejection of transport get_artifact without non-empty session_id.
 30. Positive verification of full legitimate result with result_id verified.
 31. Safety: rejection never transitions task to SUCCESS or causes mutations.
+32. Rejection of UNKNOWN outcome with alien result_id when authority has record.
+33. Rejection of FAILED outcome with alien result_id when authority has record.
+34. Rejection of CANCELLED outcome with alien result_id when authority has record.
+35. Positive verification of UNKNOWN, FAILED, and CANCELLED with authentic result_id.
+36. Rejection of non-success outcome when authority has no execution record (no false accreditation).
+37. Rejection when transport lacks get_execution_identity capability (no unverified authentication).
 """
 import hashlib
 import io
@@ -429,13 +436,21 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
 
     def test_07_uncertain_outcome_preservation(self):
         """7. Verify uncertain outcome is never converted into success."""
+        start_ack = self.client.start_task(
+            task=self.task,
+            attempt_id=self.attempt_id,
+            authorization_ref=self.auth_ref,
+        )
+        session_id = start_ack["session_id"]
+        execution_id = self.ledger.run(session_id)["execution_id"]
+
         uncertain_envelope = {
             "deployment_id": self.deployment_id,
             "task_id": canonical_uuid_for_task(self.task.task_id),
-            "session_id": "s-uncertain",
+            "session_id": session_id,
             "attempt_id": self.attempt_id,
             "generation": 1,
-            "result_id": str(uuid.uuid4()),
+            "result_id": execution_id,
             "outcome": "UNKNOWN",
             "duration_seconds": 0.0,
         }
@@ -443,7 +458,7 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
             self.task,
             uncertain_envelope,
             attempt_id=self.attempt_id,
-            session_id="s-uncertain",
+            session_id=session_id,
         )
         self.assertEqual(res.status, "UNKNOWN")
         self.assertNotEqual(res.status, "SUCCESS")
@@ -608,19 +623,23 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
         self.assertIn("artifact_ref", str(ctx.exception))
 
         # Has artifact_ref, but artifact is not published in authority
+        start_ack = self.client.start_task(task=self.task, attempt_id=self.attempt_id, authorization_ref=self.auth_ref)
+        session_id = start_ack["session_id"]
+        execution_id = self.ledger.run(session_id)["execution_id"]
+
         envelope_no_bytes = {
             "deployment_id": self.deployment_id,
             "task_id": canonical_uuid_for_task(self.task.task_id),
-            "session_id": "s-test",
+            "session_id": session_id,
             "attempt_id": self.attempt_id,
             "generation": 1,
-            "result_id": str(uuid.uuid4()),
+            "result_id": execution_id,
             "outcome": "SUCCEEDED",
             "artifact_ref": "nonexistent-artifact-999",
             "artifact_sha256": "a" * 64,
         }
         with self.assertRaises(AdapterError) as ctx:
-            self.client.process_execution_outcome(self.task, envelope_no_bytes, attempt_id=self.attempt_id, session_id="s-test", raw_artifact_bytes=None)
+            self.client.process_execution_outcome(self.task, envelope_no_bytes, attempt_id=self.attempt_id, session_id=session_id, raw_artifact_bytes=None)
         self.assertIn("UNPUBLISHED_ARTIFACT", str(ctx.exception))
 
     def test_16_rejection_missing_artifact_hash(self):
@@ -1008,6 +1027,136 @@ class TestCrosswireLiveForgeLink(unittest.TestCase):
 
         # Task phase in DMAOL remains ASSIGNED, never COMPLETED or SUCCESS
         self.assertEqual(self.task.phase, TaskPhase.ASSIGNED)
+
+    # -----------------------------------------------------------------------
+    # FASE 3D-M: CORRELACIÓN ESTRICTA DE RESULT_ID PARA ESTADOS NO EXITOSOS
+    # -----------------------------------------------------------------------
+
+    def test_32_rejection_alien_result_id_unknown(self):
+        """32. Rejection: UNKNOWN outcome with alien result_id must be rejected when authority has record."""
+        start_ack = self.client.start_task(task=self.task, attempt_id=self.attempt_id, authorization_ref=self.auth_ref)
+        session_id = start_ack["session_id"]
+        alien_result_id = str(uuid.uuid4())
+
+        envelope = {
+            "deployment_id": self.deployment_id,
+            "task_id": canonical_uuid_for_task(self.task.task_id),
+            "session_id": session_id,
+            "attempt_id": self.attempt_id,
+            "generation": 1,
+            "result_id": alien_result_id,
+            "outcome": "UNKNOWN",
+            "duration_seconds": 0.0,
+        }
+        with self.assertRaises(ResourceIdentityUnverifiableError) as ctx:
+            self.client.process_execution_outcome(self.task, envelope, attempt_id=self.attempt_id, session_id=session_id)
+        self.assertIn("does not match authority execution_id", str(ctx.exception))
+
+    def test_33_rejection_alien_result_id_failed(self):
+        """33. Rejection: FAILED outcome with alien result_id must be rejected when authority has record."""
+        start_ack = self.client.start_task(task=self.task, attempt_id=self.attempt_id, authorization_ref=self.auth_ref)
+        session_id = start_ack["session_id"]
+        alien_result_id = str(uuid.uuid4())
+
+        envelope = {
+            "deployment_id": self.deployment_id,
+            "task_id": canonical_uuid_for_task(self.task.task_id),
+            "session_id": session_id,
+            "attempt_id": self.attempt_id,
+            "generation": 1,
+            "result_id": alien_result_id,
+            "outcome": "FAILED",
+            "duration_seconds": 0.0,
+        }
+        with self.assertRaises(ResourceIdentityUnverifiableError) as ctx:
+            self.client.process_execution_outcome(self.task, envelope, attempt_id=self.attempt_id, session_id=session_id)
+        self.assertIn("does not match authority execution_id", str(ctx.exception))
+
+    def test_34_rejection_alien_result_id_cancelled(self):
+        """34. Rejection: CANCELLED outcome with alien result_id must be rejected when authority has record."""
+        start_ack = self.client.start_task(task=self.task, attempt_id=self.attempt_id, authorization_ref=self.auth_ref)
+        session_id = start_ack["session_id"]
+        alien_result_id = str(uuid.uuid4())
+
+        envelope = {
+            "deployment_id": self.deployment_id,
+            "task_id": canonical_uuid_for_task(self.task.task_id),
+            "session_id": session_id,
+            "attempt_id": self.attempt_id,
+            "generation": 1,
+            "result_id": alien_result_id,
+            "outcome": "CANCELLED",
+            "duration_seconds": 0.0,
+        }
+        with self.assertRaises(ResourceIdentityUnverifiableError) as ctx:
+            self.client.process_execution_outcome(self.task, envelope, attempt_id=self.attempt_id, session_id=session_id)
+        self.assertIn("does not match authority execution_id", str(ctx.exception))
+
+    def test_35_authentic_result_id_all_non_success_outcomes(self):
+        """35. Positive: FAILED, CANCELLED, and UNKNOWN with authentic result_id produce expected contractual result."""
+        start_ack = self.client.start_task(task=self.task, attempt_id=self.attempt_id, authorization_ref=self.auth_ref)
+        session_id = start_ack["session_id"]
+        execution_id = self.ledger.run(session_id)["execution_id"]
+
+        for outcome, expected_status in [("UNKNOWN", "UNKNOWN"), ("FAILED", "FAILED"), ("CANCELLED", "FAILED")]:
+            envelope = {
+                "deployment_id": self.deployment_id,
+                "task_id": canonical_uuid_for_task(self.task.task_id),
+                "session_id": session_id,
+                "attempt_id": self.attempt_id,
+                "generation": 1,
+                "result_id": execution_id,
+                "outcome": outcome,
+                "duration_seconds": 0.25,
+            }
+            res = self.client.process_execution_outcome(self.task, envelope, attempt_id=self.attempt_id, session_id=session_id)
+            self.assertEqual(res.status, expected_status)
+            self.assertEqual(res.fencing_token_used, 1)
+
+    def test_36_rejection_missing_authority_evidence(self):
+        """36. Rejection: Non-success outcome when authority has no execution record is rejected (no false accreditation)."""
+        envelope = {
+            "deployment_id": self.deployment_id,
+            "task_id": canonical_uuid_for_task(self.task.task_id),
+            "session_id": "s-unrecorded-9999",
+            "attempt_id": self.attempt_id,
+            "generation": 1,
+            "result_id": str(uuid.uuid4()),
+            "outcome": "FAILED",
+            "duration_seconds": 0.0,
+        }
+        with self.assertRaises(ResourceIdentityUnverifiableError) as ctx:
+            self.client.process_execution_outcome(self.task, envelope, attempt_id=self.attempt_id, session_id="s-unrecorded-9999")
+        self.assertIn("Authority has no execution record", str(ctx.exception))
+
+    def test_37_rejection_transport_without_identity_capability(self):
+        """37. Rejection: Transport lacking get_execution_identity capability cannot authenticate any outcome."""
+        session_id, artifact_ref, real_bytes, real_sha, execution_id = self._create_finished_session()
+
+        class MinimalTransport:
+            def send_request(self, raw_bytes):
+                return b"{}"
+
+        blind_client = DmaolLiveClient(transport=MinimalTransport(), deployment_id=self.deployment_id)
+        envelope = {
+            "deployment_id": self.deployment_id,
+            "task_id": canonical_uuid_for_task(self.task.task_id),
+            "session_id": session_id,
+            "attempt_id": self.attempt_id,
+            "generation": 1,
+            "result_id": execution_id,
+            "outcome": "SUCCEEDED",
+            "artifact_ref": artifact_ref,
+            "artifact_sha256": real_sha,
+        }
+        with self.assertRaises(ResourceIdentityUnverifiableError) as ctx:
+            blind_client.process_execution_outcome(
+                self.task,
+                envelope,
+                attempt_id=self.attempt_id,
+                session_id=session_id,
+            )
+        self.assertIn("does not support authentic execution identity verification", str(ctx.exception))
 
 
 if __name__ == "__main__":

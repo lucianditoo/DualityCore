@@ -1,0 +1,127 @@
+{
+  "fixture_version": 1,
+  "mode": "SIMULATED_CHANNEL_ONLY",
+  "setup": {
+    "deployment_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "task_id": "22222222-2222-4222-8222-222222222222",
+    "attempt_id": "33333333-3333-4333-8333-333333333333",
+    "generation": 7,
+    "authorization_ref": "approval-lab-001"
+  },
+  "steps": [
+    {
+      "request": {
+        "version": "dmaol-executor/1",
+        "op": "start",
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "deployment_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "task_id": "22222222-2222-4222-8222-222222222222",
+        "attempt_id": "33333333-3333-4333-8333-333333333333",
+        "generation": 7,
+        "session_id": null,
+        "authorization_ref": "approval-lab-001",
+        "profile_ref": "isolated-task-v1",
+        "input_ref": "artifact-input-001",
+        "input_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "execution_timeout_ms": 60000
+      },
+      "expect": {
+        "task_state": "ACCEPTED",
+        "resource_state": "NOT_CREATED",
+        "certainty": "CONFIRMED",
+        "state_version": 1,
+        "error": null
+      }
+    },
+    {
+      "restart": true
+    },
+    {
+      "request": {
+        "version": "dmaol-executor/1",
+        "op": "start",
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "deployment_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "task_id": "22222222-2222-4222-8222-222222222222",
+        "attempt_id": "33333333-3333-4333-8333-333333333333",
+        "generation": 7,
+        "session_id": null,
+        "authorization_ref": "approval-lab-001",
+        "profile_ref": "isolated-task-v1",
+        "input_ref": "artifact-input-001",
+        "input_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "execution_timeout_ms": 60000
+      },
+      "same_as_step": 0
+    },
+    {
+      "request": {
+        "version": "dmaol-executor/1",
+        "op": "observe",
+        "request_id": "55555555-5555-4555-8555-555555555555",
+        "authorization_ref": "approval-lab-001",
+        "lookup_request_id": "11111111-1111-4111-8111-111111111111"
+      },
+      "expect": {
+        "session_id": "$session_id",
+        "state_version": 1
+      }
+    },
+    {
+      "request": {
+        "version": "dmaol-executor/1",
+        "op": "observe",
+        "request_id": "77777777-7777-4777-8777-777777777777",
+        "authorization_ref": "approval-lab-001",
+        "deployment_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "task_id": "22222222-2222-4222-8222-222222222222",
+        "attempt_id": "33333333-3333-4333-8333-333333333333",
+        "generation": 7,
+        "session_id": "$session_id"
+      },
+      "expect": {
+        "task_state": "ACCEPTED",
+        "state_version": 1
+      }
+    },
+    {
+      "request": {
+        "version": "dmaol-executor/1",
+        "op": "cancel",
+        "request_id": "66666666-6666-4666-8666-666666666666",
+        "authorization_ref": "approval-lab-001",
+        "deployment_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "task_id": "22222222-2222-4222-8222-222222222222",
+        "attempt_id": "33333333-3333-4333-8333-333333333333",
+        "generation": 7,
+        "session_id": "$session_id",
+        "reason_code": "OPERATOR_REQUEST"
+      },
+      "expect": {
+        "task_state": "CANCEL_REQUESTED",
+        "resource_state": "NOT_CREATED",
+        "state_version": 2
+      }
+    },
+    {
+      "request": {
+        "version": "dmaol-executor/1",
+        "op": "recover",
+        "request_id": "88888888-8888-4888-8888-888888888888",
+        "authorization_ref": "approval-lab-001",
+        "deployment_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "task_id": "22222222-2222-4222-8222-222222222222",
+        "attempt_id": "33333333-3333-4333-8333-333333333333",
+        "generation": 7,
+        "session_id": "$session_id"
+      },
+      "expect": {
+        "task_state": "UNKNOWN",
+        "resource_state": "UNKNOWN",
+        "certainty": "UNKNOWN",
+        "state_version": 3
+      },
+      "error_code": "OUTCOME_UNKNOWN"
+    }
+  ]
+}

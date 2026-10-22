@@ -1,0 +1,19 @@
+{
+  "active": false,
+  "artifact_lock_sha256": "1efdab73941f43f684ba5be67088b06e7a9b0cf4f7dfae15c63c2a7c11260c43",
+  "authorization_id": null,
+  "boot_id": null,
+  "expires_unix": null,
+  "issued_unix": null,
+  "l00_result_sha256": null,
+  "manifest_sha256": "62965e8b0c27d4d79750dd71a015ea94ca11d2d894e2a858fc1082fc6f7f8dfd",
+  "operator_attestations": {
+    "exclusive_resources": false,
+    "independent_disposable_vm": false,
+    "no_host_mounts": false,
+    "no_production_access": false
+  },
+  "schema_version": 1,
+  "scopes": [],
+  "vm_uuid": null
+}

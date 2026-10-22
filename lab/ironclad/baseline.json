@@ -1,0 +1,12 @@
+{
+  "commit": "ccc54e6f25f37f3541d52d14a8fe295beb95e8e7",
+  "executor_sha256": "00ea3fb806afc56b80f45a34c72fb252a6345ef71ffad54102807d9917a75ce0",
+  "integration_executed": false,
+  "phase": "PREPARATION_ONLY",
+  "reference_note": "Local read-only reference; not included in the baseline Git tree or required for L00/L01",
+  "reference_sha256": "1a2ea886ee1045024c1e1037c180e66246565dab52fd57466080bc8c3f360331",
+  "schema_version": 1,
+  "tests_sha256": "6ab3f38ab58c6797663a79c1abfe431e4efafd24eec379ef9646ef3052aa727d",
+  "unit_tests_executed_in_phase2": false,
+  "unit_tests_historical_count": 122
+}

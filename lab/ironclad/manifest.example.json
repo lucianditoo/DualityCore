@@ -1,0 +1,52 @@
+{
+  "artifact_root": "/srv/ironclad/bundle",
+  "baseline": {
+    "artifact_lock_sha256": "1efdab73941f43f684ba5be67088b06e7a9b0cf4f7dfae15c63c2a7c11260c43",
+    "commit": "ccc54e6f25f37f3541d52d14a8fe295beb95e8e7",
+    "executor_sha256": "00ea3fb806afc56b80f45a34c72fb252a6345ef71ffad54102807d9917a75ce0",
+    "tests_sha256": "6ab3f38ab58c6797663a79c1abfe431e4efafd24eec379ef9646ef3052aa727d"
+  },
+  "docker": {
+    "daemon_id": null,
+    "data_root": "/srv/ironclad/docker-data",
+    "endpoint": "unix:///run/ironclad/docker.sock",
+    "execution_enabled": false,
+    "socket_device": null,
+    "socket_inode": null,
+    "socket_uid": null
+  },
+  "execution_enabled": false,
+  "limits": {
+    "child_timeout_seconds": 9,
+    "max_event_bytes": 32768,
+    "max_events": 256,
+    "max_stream_bytes": 4096
+  },
+  "resources": {
+    "allowed_container_ids": [],
+    "allowed_container_names": [],
+    "docker_mutations_allowed": false,
+    "fixture_modes": [],
+    "max_direct_children": 1
+  },
+  "roots": {
+    "evidence": "/srv/ironclad/evidence",
+    "runtime": "/srv/ironclad/runtime",
+    "state": "/srv/ironclad/state"
+  },
+  "run_id": "6f1b4c82d9074a35a0e981c6f4d23b70",
+  "schema_version": 1,
+  "vm": {
+    "boot_id": null,
+    "mount_namespace_inode": null,
+    "mountinfo_sha256": null,
+    "network_interfaces": [
+      "lo"
+    ],
+    "operator_uid": null,
+    "pid_namespace_inode": null,
+    "product_uuid": null,
+    "root_device": null,
+    "root_inode": null
+  }
+}

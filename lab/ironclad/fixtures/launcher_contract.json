@@ -1,0 +1,14 @@
+{
+  "allowed_scenarios": [
+    "eof",
+    "timeout"
+  ],
+  "baseline_commit": "ccc54e6f25f37f3541d52d14a8fe295beb95e8e7",
+  "expected_no_permit_exit": 125,
+  "launcher_poll_timeout_ms": 5000,
+  "launcher_sha256": "64e5e693f1877750716794685a77a32516ae80b07213569d70fd0b03c4da49cc",
+  "permitted_release_bytes": 0,
+  "preparation_status": "NOT_EXECUTED",
+  "schema_version": 1,
+  "unexpected_exec_canary_exit": 126
+}

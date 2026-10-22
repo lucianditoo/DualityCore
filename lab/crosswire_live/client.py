@@ -1,4 +1,4 @@
-"""DMAOL Live Client (Phase 3D-E).
+"""DMAOL Live Client (Phase 3D-G Hardened).
 
 Experimental high-level client wrapping DmaolExecutorAdapter to interact
 with FORGE LINK / ExecutionLedger under dmaol-executor/1 without creating
@@ -16,6 +16,7 @@ from orchestration.integration.errors import (
     AdapterError,
     StaleGenerationError,
     ContractValidationError,
+    ResourceIdentityUnverifiableError,
 )
 from orchestration.integration.executor_adapter import (
     DmaolExecutorAdapter,
@@ -28,6 +29,7 @@ from lab.crosswire_live.transport import ForgeLinkDirectTransport
 FIXED_PROFILE = "isolated-echo-v1"
 FIXED_INPUT_REF = "ignition-fixed-input-v1"
 FIXED_INPUT_HASH = hashlib.sha256(b"").hexdigest()
+MAX_CONTRACT_INT = 9007199254740991
 
 
 class DmaolLiveClient:
@@ -35,6 +37,7 @@ class DmaolLiveClient:
 
     def __init__(self, transport: ForgeLinkDirectTransport, deployment_id: str):
         self.adapter = DmaolExecutorAdapter(transport=transport, deployment_id=deployment_id)
+        self.transport = transport
         self.deployment_id = deployment_id
 
     def start_task(
@@ -120,36 +123,138 @@ class DmaolLiveClient:
         self,
         task: TaskEnvelope,
         result_envelope: Dict[str, Any],
+        attempt_id: Optional[str] = None,
+        session_id: Optional[str] = None,
         raw_artifact_bytes: Optional[bytes] = None,
     ) -> ExecutionResult:
         """Convert a contractual result envelope into DMAOL's ExecutionResult.
 
         Guarantees:
-        1. Fencing validation: generation must match task.fencing_token.
-        2. Outcome preservation: outcome UNKNOWN remains UNKNOWN.
-        3. Artifact validation: if raw bytes provided, verifies SHA-256 matches evidence.
-        4. No synthetic Git commits or execution times.
+        1. Strict Generation Types: rejects booleans, floats, strings, nulls, and out-of-range values.
+        2. Contractual Identity: validates deployment_id, task_id, attempt_id, and session_id against
+           the expected task/attempt/session and client configuration.
+        3. Mandatory Artifact Integrity: for SUCCEEDED outcomes, requires valid artifact_ref,
+           artifact_sha256, retrieves artifact bytes from the authentic authority, and verifies hash.
+        4. Outcome Preservation: outcome UNKNOWN remains UNKNOWN (never converted to SUCCESS);
+           FAILED and CANCELLED remain non-successful.
+        5. No Synthetic Data: no fabricated Git commits or execution duration.
         """
-        generation = int(result_envelope.get("generation", 0))
-        if generation != task.fencing_token:
-            raise StaleGenerationError(
-                f"Result generation {generation} does not match active task fencing token {task.fencing_token}"
+        if not isinstance(result_envelope, dict):
+            raise ContractValidationError("Result envelope must be a dictionary")
+
+        # -------------------------------------------------------------------
+        # ETAPA 2: Tipos estrictos de generación (rechaza bool, str, float, null, fuera de rango)
+        # -------------------------------------------------------------------
+        if "generation" not in result_envelope:
+            raise ContractValidationError("Missing 'generation' in result envelope")
+
+        gen_raw = result_envelope["generation"]
+        if gen_raw is None:
+            raise ContractValidationError("Generation cannot be None")
+
+        # In Python, bool is a subclass of int (isinstance(True, int) is True).
+        # We must explicitly reject booleans.
+        if type(gen_raw) is not int or isinstance(gen_raw, bool):
+            raise ContractValidationError(
+                f"Invalid generation type: {type(gen_raw).__name__} (value: {gen_raw!r}). Generation must be a strict integer."
             )
 
-        outcome = result_envelope.get("outcome", "FAILED")
-        artifact_sha256 = result_envelope.get("artifact_sha256")
+        if gen_raw < 1 or gen_raw > MAX_CONTRACT_INT:
+            raise ContractValidationError(
+                f"Generation must be an integer between 1 and {MAX_CONTRACT_INT}, got {gen_raw}"
+            )
 
-        # Verify raw bytes integrity if available
-        if raw_artifact_bytes is not None and artifact_sha256:
-            actual_sha = hashlib.sha256(raw_artifact_bytes).hexdigest()
-            if actual_sha != artifact_sha256:
-                raise AdapterError(
-                    "ARTIFACT_INTEGRITY_MISMATCH",
-                    f"Artifact content hash {actual_sha} does not match contractual evidence {artifact_sha256}",
-                    operation="validate_artifact",
-                )
+        if gen_raw != task.fencing_token:
+            raise StaleGenerationError(
+                f"Result generation {gen_raw} does not match active task fencing token {task.fencing_token}"
+            )
+
+        # -------------------------------------------------------------------
+        # ETAPA 1: Identidad contractual completa
+        # -------------------------------------------------------------------
+        # Deployment identity validation
+        res_deployment = result_envelope.get("deployment_id")
+        if res_deployment is not None and res_deployment != self.deployment_id:
+            raise ResourceIdentityUnverifiableError(
+                f"Result deployment_id '{res_deployment}' does not match client deployment_id '{self.deployment_id}'"
+            )
+
+        # Task identity validation
+        expected_task_id = canonical_uuid_for_task(task.task_id)
+        res_task_id = result_envelope.get("task_id")
+        if res_task_id is None:
+            raise ResourceIdentityUnverifiableError("Missing 'task_id' in result envelope")
+        if res_task_id != expected_task_id:
+            raise ResourceIdentityUnverifiableError(
+                f"Result task_id '{res_task_id}' does not match expected task_id '{expected_task_id}'"
+            )
+
+        # Attempt identity validation
+        res_attempt_id = result_envelope.get("attempt_id")
+        if res_attempt_id is None or not isinstance(res_attempt_id, str) or not res_attempt_id.strip():
+            raise ResourceIdentityUnverifiableError("Missing or invalid 'attempt_id' in result envelope")
+        if attempt_id is not None and res_attempt_id != attempt_id:
+            raise ResourceIdentityUnverifiableError(
+                f"Result attempt_id '{res_attempt_id}' does not match expected attempt_id '{attempt_id}'"
+            )
+
+        # Session identity validation
+        res_session_id = result_envelope.get("session_id")
+        if res_session_id is None or not isinstance(res_session_id, str) or not res_session_id.strip():
+            raise ResourceIdentityUnverifiableError("Missing or invalid 'session_id' in result envelope")
+        if session_id is not None and res_session_id != session_id:
+            raise ResourceIdentityUnverifiableError(
+                f"Result session_id '{res_session_id}' does not match expected session_id '{session_id}'"
+            )
+
+        # -------------------------------------------------------------------
+        # ETAPA 3: Integridad obligatoria y verificación de artefacto
+        # -------------------------------------------------------------------
+        outcome = result_envelope.get("outcome")
+        if outcome is None:
+            raise ContractValidationError("Missing 'outcome' in result envelope")
 
         if outcome == "SUCCEEDED":
+            artifact_ref = result_envelope.get("artifact_ref")
+            if not artifact_ref or not isinstance(artifact_ref, str) or not artifact_ref.strip():
+                raise ContractValidationError("Successful result requires a non-empty string 'artifact_ref'")
+
+            expected_sha = result_envelope.get("artifact_sha256")
+            if not expected_sha or not isinstance(expected_sha, str) or len(expected_sha) != 64:
+                raise ContractValidationError("Successful result requires a valid 64-char hex 'artifact_sha256'")
+
+            # Obtain raw artifact bytes from the authentic authority or caller
+            actual_bytes = None
+            if hasattr(self.transport, "get_artifact"):
+                authority_bytes = self.transport.get_artifact(artifact_ref)
+                if authority_bytes is not None:
+                    if raw_artifact_bytes is not None and raw_artifact_bytes != authority_bytes:
+                        raise AdapterError(
+                            "ARTIFACT_CONTENT_MISMATCH",
+                            "Supplied raw_artifact_bytes does not match authentic artifact bytes stored in authority",
+                            operation="verify_artifact",
+                        )
+                    actual_bytes = authority_bytes
+
+            if actual_bytes is None:
+                actual_bytes = raw_artifact_bytes
+
+            if actual_bytes is None:
+                raise AdapterError(
+                    "ARTIFACT_BYTES_MISSING",
+                    f"Successful outcome requires artifact bytes for '{artifact_ref}', but bytes were not provided or available from authority",
+                    operation="verify_artifact",
+                )
+
+            # Verify cryptographic hash
+            actual_sha = hashlib.sha256(actual_bytes).hexdigest()
+            if actual_sha != expected_sha:
+                raise AdapterError(
+                    "ARTIFACT_INTEGRITY_MISMATCH",
+                    f"Computed artifact SHA-256 '{actual_sha}' does not match contractual evidence '{expected_sha}'",
+                    operation="verify_artifact",
+                )
+
             status = "SUCCESS"
         elif outcome == "UNKNOWN":
             status = "UNKNOWN"
@@ -165,10 +270,10 @@ class DmaolLiveClient:
 
         return ExecutionResult(
             status=status,
-            summary=f"Result from Forge Link session {result_envelope.get('session_id', 'unknown')} (outcome={outcome})",
+            summary=f"Result from Forge Link session {res_session_id} (outcome={outcome})",
             commit_sha=result_envelope.get("commit_sha"),  # None unless explicitly provided
             generated_artifacts=artifacts,
             execution_time_seconds=duration,
             completed_at=time.time(),
-            fencing_token_used=generation,
+            fencing_token_used=gen_raw,
         )

@@ -30,3 +30,16 @@ class ForgeLinkDirectTransport:
             return dump_strict_json(resp)
         else:
             raise TypeError(f"Unexpected response type from handler: {type(resp)}")
+
+    def get_artifact(self, artifact_ref: str) -> Optional[bytes]:
+        """Retrieve verified artifact bytes from the target authority if supported."""
+        if hasattr(self.target_handler, "artifact") and callable(getattr(self.target_handler, "artifact")):
+            try:
+                res = self.target_handler.artifact(artifact_ref)
+                if isinstance(res, tuple):
+                    return res[0]  # (content, sha)
+                elif isinstance(res, bytes):
+                    return res
+            except Exception:
+                return None
+        return None

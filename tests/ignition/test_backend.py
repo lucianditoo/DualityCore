@@ -67,7 +67,7 @@ class IgnitionTests(unittest.TestCase):
             future = pool.submit(self.backend.execute, self.q['request_id'])
             self.wait_state('RUNNING')
             # Deliberately obstruct only the scratch artifact of our own child.
-            workspace = next(self.lab.root.glob('run-*'))
+            workspace = next(self.lab.root.glob('s-*'))
             (workspace / 'artifact.txt').mkdir()
             done = future.result(timeout=5)
         self.assertEqual(done['state'], 'FAILED')
@@ -143,7 +143,12 @@ class IgnitionTests(unittest.TestCase):
         for phase in ('INTENT', 'SPAWNING', 'RUNNING', 'CANCELLING'):
             with self.subTest(phase=phase):
                 with sqlite3.connect(self.backend.ledger) as db:
-                    db.execute('UPDATE attempts SET state=? WHERE request=?', (phase, self.q['request_id']))
+                    row = db.execute('SELECT session, body FROM runs').fetchone()
+                    run = json.loads(row[1])
+                    run['phase'] = 'RUNNING' if phase == 'CANCELLING' else phase
+                    from lab.ignition.process_runner import identity
+                    run['identity'] = identity(os.getpid()) if run['phase'] == 'RUNNING' else None
+                    db.execute('UPDATE runs SET body=? WHERE session=?', (json.dumps(run), row[0]))
                 other = Backend(self.lab.root)
                 try:
                     with patch('lab.ignition.backend.subprocess.Popen', side_effect=AssertionError('no launch')), patch('os.kill', side_effect=AssertionError('no signal')):
@@ -155,7 +160,7 @@ class IgnitionTests(unittest.TestCase):
                 finally:
                     other.close()
 
-    def test_recovery_during_live_execution_blocks_publication(self):
+    def test_recovery_during_live_execution_does_not_terminate(self):
         self.start()
         other = Backend(self.lab.root)
         self.addCleanup(other.close)
@@ -164,9 +169,11 @@ class IgnitionTests(unittest.TestCase):
             self.wait_state('RUNNING')
             self.assertEqual(other.recover(self.q['request_id'])['state'], 'UNKNOWN')
             done = future.result(timeout=5)
-        self.assertEqual(done['state'], 'UNKNOWN')
-        self.assertFalse(done['result']['accepted_as_current'])
+        self.assertEqual(done['state'], 'SUCCEEDED')
+        self.assertTrue(done['result']['accepted_as_current'])
         self.assertTrue(done['result']['exit_confirmed'])
+        self.assertEqual(done['result']['returncode'], 0)
+        self.assertGreaterEqual(done['result']['duration_seconds'], 0.4)
 
     def test_generation_advance_blocks_old_result_and_cancel(self):
         self.start()
@@ -210,13 +217,13 @@ class IgnitionTests(unittest.TestCase):
     def test_missing_corrupt_ledger_fails_without_reinitializing(self):
         self.start()
         with sqlite3.connect(self.backend.ledger) as db:
-            db.execute('DELETE FROM meta')
+            db.execute('DELETE FROM model')
         with self.assertRaises(LedgerError):
             Backend(self.lab.root)
         with self.assertRaises(LedgerError):
             self.backend.execute(self.q['request_id'])
         self.backend.ledger.unlink()
-        with self.assertRaises(sqlite3.OperationalError):
+        with self.assertRaises(LedgerError):
             Backend(self.lab.root)
         self.assertFalse(self.backend.ledger.exists())
 
@@ -225,9 +232,8 @@ class IgnitionTests(unittest.TestCase):
         with patch('lab.ignition.backend.subprocess.Popen', side_effect=OSError('injected launch failure')):
             done = self.backend.execute(self.q['request_id'])
         self.assertEqual(done['state'], 'UNKNOWN')
-        self.assertFalse(done['result']['exit_confirmed'])
-        self.assertIsNone(done['result']['returncode'])
-        self.assertIsNone(done['result']['artifact_sha256'])
+        self.assertIsNone(done['result'])
+        self.assertIsNone(self.backend.facts(self.q['request_id'])['identity'])
         self.assertEqual(self.backend.execute(self.q['request_id']), done)
 
     def test_close_while_child_is_owned_is_rejected(self):
@@ -254,7 +260,7 @@ class IgnitionTests(unittest.TestCase):
         other = Backend(self.lab.root)
         self.addCleanup(other.close)
         # Artifact exists and is correct, but there is no committed result evidence.
-        artifacts = list(self.lab.root.glob('run-*/artifact.txt'))
+        artifacts = list(self.lab.root.glob('s-*/artifact.txt'))
         self.assertEqual(len(artifacts), 1)
         self.assertEqual(artifacts[0].read_bytes(), ARTIFACT)
         self.assertEqual(other.observe(self.q['request_id'])['state'], 'RUNNING')
@@ -280,13 +286,16 @@ class IgnitionTests(unittest.TestCase):
     def test_corrupt_result_and_fingerprint_are_not_replayed(self):
         self.start()
         done = self.backend.execute(self.q['request_id'])
-        result = dict(done['result'], generation=2)
         with sqlite3.connect(self.backend.ledger) as db:
-            db.execute('UPDATE attempts SET result=?', (json.dumps(result),))
+            original = json.loads(db.execute('SELECT body FROM model').fetchone()[0])
+            state = json.loads(json.dumps(original))
+            state['results'][done['execution_id']]['body']['generation'] = 2
+            db.execute('UPDATE model SET body=?', (json.dumps(state),))
         with self.assertRaises(LedgerError):
             self.backend.observe(self.q['request_id'])
         with sqlite3.connect(self.backend.ledger) as db:
-            db.execute('UPDATE attempts SET result=?,fingerprint=?', (json.dumps(done['result']), 'corrupt'))
+            original['requests'][self.q['request_id']]['hash'] = 'corrupt'
+            db.execute('UPDATE model SET body=?', (json.dumps(original),))
         with self.assertRaises(LedgerError):
             Backend(self.lab.root)
 

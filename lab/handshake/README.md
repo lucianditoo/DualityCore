@@ -257,3 +257,18 @@ DMAOL real ni una especificación CROSSWIRE adicional: compatibilidad aquí sign
 conservar el contrato local y pasar los fixtures y las 21 pruebas 3B-B previas.
 Autenticación, políticas reales, infraestructura y exactly-once siguen fuera de
 alcance. Esta fase no habilita ninguna integración, despliegue ni auditoría adicional.
+
+
+## FORGE LINK 3D-C2 — autoridad compartida
+
+La implementación durable se extrajo a `ledger.py`. `simulator.py` conserva la
+fachada Simulator, sus importaciones públicas, constructor y respuestas previas;
+las 36 pruebas originales siguen ejecutándose sin cambios. El simulador sigue
+sin lanzar procesos y conserva su política aislada `isolated-task-v1`.
+
+`ExecutionLedger` reutiliza esa misma autoridad y transacción para IGNITION y FORGE
+LINK. Añade tablas de hechos de proceso y snapshots de artefactos en el **mismo**
+archivo SQLite, sin otra tabla de generaciones. No admite simulate_evidence ni
+simulate_result. El perfil real usa `isolated-echo-v1` y sólo input vacío con una
+referencia fija aprobada. La integración y sus límites se describen en
+[FORGE LINK](../forge_link/README.md). No se alteró el protocolo ni sus fixtures.

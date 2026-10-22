@@ -1,3 +1,40 @@
+# IGNITION — actualización FORGE LINK 3D-C2
+
+Esta sección reemplaza las descripciones de arquitectura y supervisión de 3D-A
+conservadas más abajo como registro histórico. El backend local ahora usa
+`lab/handshake/ledger.py` como **única autoridad**. No existe la tabla generations
+anterior de IGNITION; proceso y artefactos se vinculan a sus asignaciones contractuales.
+`process_runner.py` no decide generaciones, no acepta resultados y no publica.
+
+Se eliminó todo escalado automático a SIGKILL. Recover sólo registra conocimiento:
+no crea cancelación y no causa señales indirectas. Un resultado inicialmente
+UNKNOWN puede resolverse mediante evidencia posterior verificada del supervisor
+que todavía posee al hijo. Revocar una generación tampoco envía señales.
+
+Timeout se registra antes de confirmar salida. La API local Laboratory habilita
+SIGTERM por timeout como política explícita y durable del perfil de demostración;
+el adaptador contractual no lo habilita. La cancelación explícita autorizada permite
+un único SIGTERM al hijo propio. Si lo ignora, la supervisión y el drenado continúan
+sin SIGKILL hasta la salida natural; mientras tanto se conservan identidad y estado
+incierto. No existe garantía de respuesta final acotada ni recuperación destructiva
+tras perder el supervisor. `Backend.close()` sigue rechazando procesos propios activos.
+
+Las 19 pruebas originales se adaptaron al almacenamiento compartido, workspaces
+`<root>/<session_id>` y recuperación no destructiva. Se conservaron sus objetivos:
+las inyecciones SQL ahora usan model/runs, el worker de crash actúa antes del commit
+común y la prueba que esperaba terminación indirecta ahora exige salida natural
+exitosa. Otras cuatro pruebas verifican los nuevos invariantes: **23 en total**.
+El programa resistente es un fixture fijo de test, seleccionado sólo mediante
+instrumentación Python de la prueba; ninguna solicitud puede seleccionarlo.
+
+Los comandos de pruebas y demo de 3D-A siguen vigentes. Los ledgers experimentales
+3D-A no se migran automáticamente: se rechazan. Crear un laboratorio nuevo es una
+acción explícita; no se trata como recuperación de intentos anteriores. No se borró
+ni migró ningún ledger existente. Ver [FORGE LINK](../forge_link/README.md) para la
+arquitectura actual, publicaciones y limitaciones.
+
+---
+
 # IGNITION 3D-A — Executor local experimental
 
 Baseline: `60ce2db62da97005db5cb267bc8a1e53eea55abf`, rama

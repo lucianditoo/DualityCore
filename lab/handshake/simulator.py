@@ -7,6 +7,7 @@ import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
+from pathlib import Path
 
 VERSION = 'dmaol-executor/1'
 MAX_INT = 9007199254740991
@@ -97,6 +98,117 @@ def validate(q):
         raise InvalidRequest('invalid reason')
 
 
+class LedgerCorrupt(ValueError):
+    """Local storage failure. Never translated into a successful wire reply."""
+
+
+def validate_ledger(s, deployment):
+    """Check structure and retained links, not authenticity of local storage."""
+    def require(condition):
+        if not condition:
+            raise LedgerCorrupt('inconsistent ledger')
+
+    def exact(value, keys):
+        require(type(value) is dict and set(value) == set(keys))
+
+    def identity(value):
+        require(value['deployment_id'] == deployment)
+        require(uid(value['task_id']) and uid(value['attempt_id']) and integer(value['generation']))
+        require(type(value['session_id']) is str and re.fullmatch(r's-[0-9a-f]{32}', value['session_id']) is not None)
+
+    def state(value):
+        require(type(value['task_state']) is str and value['task_state'] in TASKS)
+        require(type(value['resource_state']) is str and value['resource_state'] in RESOURCES)
+        require(type(value['certainty']) is str and value['certainty'] in CERTAINTIES)
+        require(type(value['observed_at']) is str)
+        require(datetime.datetime.fromisoformat(value['observed_at']).utcoffset() is not None)
+        require(value['executor_instance'] is None)
+
+    exact(s, {'deployment', 'authority', 'approvals', 'requests', 'assignments', 'results', 'late_results', 'used_attempts'})
+    require(s['deployment'] == deployment)
+    for field in ('authority', 'approvals', 'requests', 'assignments', 'results'):
+        require(type(s[field]) is dict)
+    require(type(s['used_attempts']) is list and all(uid(x) for x in s['used_attempts']))
+    require(len(set(s['used_attempts'])) == len(s['used_attempts']))
+    require(type(s['late_results']) is list)
+    authority_attempts = set()
+    for task, current in s['authority'].items():
+        exact(current, {'attempt_id', 'generation'})
+        require(uid(task) and uid(current['attempt_id']) and integer(current['generation']))
+        require(current['attempt_id'] in s['used_attempts'] and current['attempt_id'] not in authority_attempts)
+        authority_attempts.add(current['attempt_id'])
+    for ref, approval in s['approvals'].items():
+        exact(approval, {'task_id', 'attempt_id', 'generation', 'actions', 'expired'})
+        require(reference(ref) and uid(approval['task_id']) and uid(approval['attempt_id']) and integer(approval['generation']))
+        require(type(approval['expired']) is bool and type(approval['actions']) is list)
+        require(all(type(x) is str and x in ('start', 'observe', 'cancel', 'recover') for x in approval['actions']))
+    assignment_keys = TUPLE | {'operation_id', 'executor_instance', 'state_version', 'task_state', 'resource_state', 'certainty', 'observed_at'}
+    attempts, operations = set(), set()
+    for session, a in s['assignments'].items():
+        exact(a, assignment_keys)
+        identity(a)
+        state(a)
+        require(session == a['session_id'] and uid(a['operation_id']) and integer(a['state_version']))
+        require(a['attempt_id'] in s['used_attempts'] and a['attempt_id'] not in attempts and a['operation_id'] not in operations)
+        attempts.add(a['attempt_id'])
+        operations.add(a['operation_id'])
+        current = s['authority'].get(a['task_id'])
+        require(current is not None and current['generation'] >= a['generation'])
+        require(current['generation'] != a['generation'] or current['attempt_id'] == a['attempt_id'])
+    response_keys = assignment_keys | {'version', 'request_id', 'source', 'error'}
+    starts = set()
+    for request, record in s['requests'].items():
+        exact(record, {'hash', 'response', 'op', 'session'})
+        require(uid(request) and token(record['hash'], 64) and record['op'] in ('start', 'observe', 'cancel', 'recover'))
+        r = record['response']
+        exact(r, response_keys)
+        state(r)
+        require(r['version'] == VERSION and r['source'] == 'simulator-ledger' and r['request_id'] == request and r['deployment_id'] == deployment)
+        if r['error'] is not None:
+            exact(r['error'], {'code', 'operation', 'effect', 'retry', 'operator_review_required', 'executor_error_code'})
+            error = r['error']
+            require(type(error['code']) is str and error['code'] in {'INVALID_REQUEST', 'UNAUTHORIZED', 'APPROVAL_EXPIRED', 'DEPENDENCY_UNVERIFIED', 'STALE_GENERATION', 'IDEMPOTENCY_CONFLICT', 'BUSY', 'ALREADY_TERMINAL', 'OUTCOME_UNKNOWN', 'RESOURCE_IDENTITY_UNVERIFIABLE'})
+            require(error == Simulator.error(error['code'], record['op']))
+        if record['session'] is None:
+            require(all(r[k] is None for k in ('task_id', 'attempt_id', 'generation', 'session_id', 'operation_id', 'state_version')))
+            require(r['error'] is not None)
+        else:
+            a = s['assignments'].get(record['session'])
+            require(a is not None)
+            identity(r)
+            require(all(r[k] == a[k] for k in TUPLE | {'operation_id'}))
+            require(integer(r['state_version']) and r['state_version'] <= a['state_version'])
+            if record['op'] == 'start' and r['error'] is None:
+                require(record['session'] not in starts)
+                starts.add(record['session'])
+    require(starts == set(s['assignments']))
+    accepted = set()
+    for result_id, record in s['results'].items():
+        exact(record, {'body', 'status'})
+        r = record['body']
+        exact(r, TUPLE | {'result_id', 'outcome', 'artifact_ref', 'artifact_sha256'})
+        # Rejected identities may belong to another deployment; their syntax is
+        # still checked, but they must never become accepted assignments.
+        require(uid(result_id) and r['result_id'] == result_id and token(r['deployment_id'], 32))
+        require(uid(r['task_id']) and uid(r['attempt_id']) and integer(r['generation']))
+        require(type(r['session_id']) is str and re.fullmatch(r's-[0-9a-f]{32}', r['session_id']) is not None)
+        require(r['outcome'] in ('SUCCEEDED', 'FAILED') and reference(r['artifact_ref']) and token(r['artifact_sha256'], 64))
+        require(record['status'] in ('ACCEPTED', 'RESOURCE_IDENTITY_UNVERIFIABLE', 'STALE_GENERATION', 'ALREADY_TERMINAL', 'OUTCOME_UNKNOWN'))
+        if record['status'] == 'ACCEPTED':
+            a = s['assignments'].get(r['session_id'])
+            require(a is not None and all(a[k] == r[k] for k in TUPLE))
+            require(a['task_state'] == r['outcome'] and r['session_id'] not in accepted)
+            accepted.add(r['session_id'])
+    require(accepted == {session for session, a in s['assignments'].items() if a['task_state'] in ('SUCCEEDED', 'FAILED')})
+    late_ids = set()
+    for r in s['late_results']:
+        require(type(r) is dict and uid(r.get('result_id')))
+        record = s['results'].get(r['result_id'])
+        require(record is not None and record['body'] == r and record['status'] == 'STALE_GENERATION' and r['result_id'] not in late_ids)
+        late_ids.add(r['result_id'])
+    require(late_ids == {key for key, r in s['results'].items() if r['status'] == 'STALE_GENERATION'})
+
+
 class Simulator:
     """Caller supplies an explicit scratch ledger path; no default production paths.
 
@@ -108,20 +220,49 @@ class Simulator:
             raise ValueError('invalid simulator configuration')
         self.deployment = deployment_id
         self.channel = simulated_channel
+        # Existing storage must never be silently reinitialized. Bootstrap one
+        # fresh scratch path before opening concurrent workers.
+        existing = Path(ledger).exists()
         self.db = sqlite3.connect(ledger, isolation_level=None)
-        self.db.execute('PRAGMA synchronous=FULL')
-        self.db.execute('CREATE TABLE IF NOT EXISTS model (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL)')
-        initial = {'deployment': deployment_id, 'authority': {}, 'approvals': {}, 'requests': {}, 'assignments': {}, 'results': {}, 'late_results': [], 'used_attempts': []}
-        self.db.execute('INSERT OR IGNORE INTO model VALUES (1, ?)', (canonical(initial),))
-        if self.db.execute('SELECT body FROM model').fetchone() and self.snapshot()['deployment'] != deployment_id:
-            self.close()
-            raise ValueError('ledger deployment mismatch')
+        try:
+            self.db.execute('PRAGMA synchronous=FULL')
+            self.db.execute('BEGIN IMMEDIATE')
+            if not existing:
+                self.db.execute('CREATE TABLE model (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL)')
+                initial = {'deployment': deployment_id, 'authority': {}, 'approvals': {}, 'requests': {}, 'assignments': {}, 'results': {}, 'late_results': [], 'used_attempts': []}
+                self.db.execute('INSERT INTO model VALUES (1, ?)', (canonical(initial),))
+            if self.db.execute('PRAGMA quick_check').fetchall() != [('ok',)]:
+                raise LedgerCorrupt('SQLite integrity check failed')
+            self.snapshot()
+            self.db.execute('COMMIT')
+        except BaseException:
+            if self.db.in_transaction:
+                self.db.execute('ROLLBACK')
+            self.db.close()
+            raise
 
     def close(self):
         self.db.close()
 
     def snapshot(self):
-        return json.loads(self.db.execute('SELECT body FROM model WHERE id=1').fetchone()[0])
+        try:
+            rows = self.db.execute('SELECT id, body FROM model').fetchall()
+            if len(rows) != 1 or rows[0][0] != 1:
+                raise LedgerCorrupt('missing or inconsistent model row')
+            def pairs(items):
+                result = {}
+                for key, value in items:
+                    if key in result:
+                        raise LedgerCorrupt('duplicate ledger key')
+                    result[key] = value
+                return result
+            def constant(_):
+                raise LedgerCorrupt('nonfinite ledger number')
+            state = json.loads(rows[0][1], object_pairs_hook=pairs, parse_constant=constant)
+            validate_ledger(state, self.deployment)
+            return state
+        except (ValueError, TypeError, KeyError, OverflowError, RecursionError) as exc:
+            raise LedgerCorrupt('ledger invalid; preserve for operator review') from exc
 
     @contextmanager
     def transaction(self):
@@ -129,9 +270,7 @@ class Simulator:
         try:
             state = self.snapshot()
             yield state
-            for assignment in state['assignments'].values():
-                if not integer(assignment['state_version']):
-                    raise ValueError('state_version exhausted or corrupt')
+            validate_ledger(state, self.deployment)
             self.db.execute('UPDATE model SET body=? WHERE id=1', (canonical(state),))
             self.db.execute('COMMIT')
         except BaseException:

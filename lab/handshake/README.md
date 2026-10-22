@@ -1,4 +1,4 @@
-# Executor Contract Simulator — Fase 3B-B
+# Executor Contract Simulator — Fases 3B-B / 3C-B
 
 Modelo experimental **offline**, para Python 3.12 y biblioteca estándar. Referencia:
 [DMAOL_EXECUTOR_CONTRACT.md](../../docs/DMAOL_EXECUTOR_CONTRACT.md).
@@ -172,3 +172,88 @@ energía, corrupción de disco, backups ni durabilidad de hardware.
 El CLI real no satisface la API de tareas; ninguna prueba aquí habilita la
 integración. Conectar un Executor, confirmar esquemas con DMAOL o desplegar requiere
 trabajo y autorización posteriores. No se crean commits ni se publica esta fase.
+
+
+## CROSSWIRE — hardening 3C-B
+
+Baseline de esta fase: `c44af038c54135a03fb1e695a375b1d13f57c456`.
+Se conserva `dmaol-executor/1`, las cuatro operaciones y los fixtures de intercambio
+3B-B sin cambios. No se añade protocolo de transporte ni servidor de red. Los nuevos
+controles verifican almacenamiento interno; no crean nuevos mensajes wire.
+
+### Defectos corregidos
+
+La apertura previa ejecutaba INSERT OR IGNORE incluso sobre un archivo existente:
+una fila model eliminada podía convertirse silenciosamente en un ledger nuevo,
+perdiendo idempotencia y tombstones. Ahora sólo se inicializa una ruta inexistente.
+Un archivo existente vacío, sin tabla/fila, truncado o de otro esquema se rechaza;
+no se recrea ni se usa como ledger nuevo. Ante fallo de apertura se cierra la conexión.
+
+Antes se aceptaba casi cualquier JSON del ledger: sólo se comprobaba deployment al
+abrir y state_version al escribir. Ahora se ejecuta quick_check al abrir, y se
+valida el estado completo al leer y antes de confirmar una transacción: esquema,
+tipos, estados, identidades, versiones, autoridad, tombstones, vínculo de solicitudes
+con asignaciones y resultados terminales/segregados. JSON duplicado, no finito o
+inconsistente provoca `LedgerCorrupt` (subclase de ValueError). Fallos físicos de
+SQLite conservan sus excepciones originales. No se devuelve ACCEPTED ni se inventa
+UNKNOWN como sustituto de evidencia perdida. No existe reparación automática.
+
+### Evidencia ejecutable
+
+La suite completa se ejecuta con el comando de arriba: **36 pruebas**, de las cuales
+15 son nuevas en `tests/handshake/test_hardening.py`. El worker auxiliar
+`tests/handshake/process_worker.py` sólo abre la SQLite temporal indicada por la
+prueba. Cada worker es un intérprete Python independiente, con conexión propia;
+no hereda conexiones ni usa Docker, Executor, sockets, red o servicios. La barrera,
+las respuestas y los logs son archivos temporales regulares. Los timeouts del harness
+sólo limitan la prueba y pueden terminar exclusivamente su propio worker descartable.
+
+| Prueba | Garantía observada en este laboratorio |
+| --- | --- |
+| Cuatro procesos con mismo start, antes/después de reabrir | Misma respuesta durable y una sola sesión |
+| Cuatro request_id distintos para el mismo intento | Una aceptación; el resto IDEMPOTENCY_CONFLICT |
+| Mismo request_id, contenido distinto, simultáneo | Una aceptación y un conflicto; sin sobrescritura |
+| Salida abrupta antes de COMMIT con UPDATE SQL pendiente | SQLite revierte la transacción; ningún registro parcial visible |
+| Salida abrupta después de COMMIT y antes del ACK | Reintentos desde otros procesos recuperan la respuesta original |
+| Duplicados y resultados terminales contrapuestos simultáneos | Un solo terminal aceptado; duplicado histórico o rechazo sin reescritura |
+| Cancel/result/reassign simultáneos y sus seis órdenes seriales | Resultado se acepta antes de revocación/cancelación, o se rechaza/queda incierto; nunca cambia el intento nuevo |
+| Resultado/cancelación antiguos tras terminal nuevo y reapertura | Conserva el terminal vigente; evidencia tardía segregada |
+| Dos deployments y dos intentos con IDs/referencias deliberadamente coincidentes | No cruzan asignaciones, aprobaciones, lookup, cancelaciones ni resultados |
+| JSON/filas/esquemas/identidades/versiones/resultados corruptos | Rechazo de apertura y de operaciones en conexiones ya abiertas, sin reconstrucción |
+| Bloqueo SQLite hasta agotar espera | Excepción local sin mutación; reintento posterior mantiene idempotencia |
+
+La recuperación conservadora demostrada consta de dos casos distintos: rollback
+nativo de una transacción interrumpida, y restauración **explícita por la prueba** de
+los datos intactos que se conservaron antes de una corrupción inyectada. Después se
+reabre y verifica la respuesta histórica, sin segundo start. Esto no es un mecanismo
+de backup/restore de producción. No se acredita restaurar snapshots atrasados, perder
+el ledger, ni descubrir operaciones cuyo registro durable desapareció.
+
+### Límites de estas garantías
+
+Los procesos concurren sobre un ledger **preinicializado**. El bootstrap simultáneo
+de una ruta nueva no está soportado: se debe crear una vez antes de lanzar workers;
+una carrera de apertura puede rechazarse de forma conservadora. Se presupone que la
+ruta del ledger permanece estable. Sustitución concurrente del archivo, symlinks,
+permisos del host y almacenamiento remoto no están cubiertos.
+
+Las validaciones detectan las corrupciones estructurales y relacionales ensayadas;
+no autentican el archivo ni detectan toda modificación coherente, rollback de un
+snapshot completo, pérdida de tombstones no vinculados o manipulación maliciosa.
+quick_check tampoco demuestra salud del hardware. No hay migración ni salvamento
+parcial. La validación recorre el ledger completo; no se ha probado escalabilidad.
+
+Las carreras ejercitan órdenes reales admitidos por SQLite local, y los seis órdenes
+seriales dan cobertura determinista del modelo. No constituyen una prueba formal de
+todos los interleavings, autoridad distribuida, fencing externo, corte de energía o
+fallos de kernel. La autoridad de reasignación sigue siendo un control ficticio:
+no confirma aislamiento/cese real antes de avanzar generación. Un ACK ACCEPTED de
+resultado repetido tras revocación describe una decisión histórica, **no publicación
+nueva**. La prueba verifica que el intento actual permanezca intacto.
+
+No se traduce sqlite3.OperationalError de lock timeout a BUSY del protocolo: sigue
+siendo fallo local del simulador, sin ACK de efecto. No se ha validado el cliente
+DMAOL real ni una especificación CROSSWIRE adicional: compatibilidad aquí significa
+conservar el contrato local y pasar los fixtures y las 21 pruebas 3B-B previas.
+Autenticación, políticas reales, infraestructura y exactly-once siguen fuera de
+alcance. Esta fase no habilita ninguna integración, despliegue ni auditoría adicional.
